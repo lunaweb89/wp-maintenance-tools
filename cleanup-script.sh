@@ -1,428 +1,418 @@
 #!/usr/bin/env bash
-# WordPress DB cleanup & optimization script
-# - Auto-checks PHP + mysqli + WP-CLI
-# - Lists WordPress installs under /home/*/public_html
-# - Cleans:
-#     * wp_options bloat (transients, WC sessions, doing_cron)
-#     * WooCommerce orders older than 3 years (if WooCommerce present)
-# - Optimizes large Woo tables afterwards
 #
-# Run as root:
-#   bash <(curl -s https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/cleanup-script.sh)
+# WordPress / WooCommerce DB cleanup tool
+# - Detects WP installs under /home/*/public_html
+# - Lets you pick a site
+# - Cleans WooCommerce data older than N years (you choose)
+# - Creates a MySQL backup before deletion and deletes backup if success
+# - Uses WP-CLI for safety
+#
 
-set -euo pipefail
+############################
+# 0. Safety / Environment  #
+############################
 
-########################
-# Helper functions
-########################
+# Don't use "set -e" because we want to track errors manually and not bail on first SQL failure.
 
-log() {
-  echo -e "[$(date +'%F %T')] $*"
-}
+if ! command -v php >/dev/null 2>&1; then
+  echo "ERROR: PHP CLI is not installed. Please install PHP and re-run."
+  exit 1
+fi
 
-pause_if_error() {
-  local rc=$1
-  local msg="$2"
-  if [ "$rc" -ne 0 ]; then
-    echo "ERROR: $msg"
-    exit "$rc"
+echo "OK: PHP found: $(php -v 2>/dev/null | head -n1)"
+
+# Check mysqli extension
+if ! php -m | grep -qi mysqli; then
+  echo "PHP mysqli extension is missing. Attempting to install automatically..."
+
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "Detected Debian/Ubuntu (apt). Installing php-mysql..."
+    apt-get update -y
+    apt-get install -y php-mysql || {
+      echo "ERROR: Failed to install php-mysql via apt."
+    }
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "Detected dnf-based OS. Installing php-mysqlnd..."
+    dnf install -y php-mysqlnd || {
+      echo "ERROR: Failed to install php-mysqlnd via dnf."
+    }
+  elif command -v yum >/dev/null 2>&1; then
+    echo "Detected yum-based OS. Installing php-mysqlnd..."
+    yum install -y php-mysqlnd || {
+      echo "ERROR: Failed to install php-mysqlnd via yum."
+    }
+  else
+    echo "Could not auto-detect package manager. Please install mysqli (php-mysql / php-mysqlnd) manually."
   fi
-}
 
-########################
-# Requirement checks
-########################
-
-check_php_and_extensions() {
-  if ! command -v php >/dev/null 2>&1; then
-    echo "PHP CLI not found. Please install PHP (php-cli) and re-run this script."
+  if ! php -m | grep -qi mysqli; then
+    echo "ERROR: mysqli extension still not detected after attempted install."
+    echo "Please install/enable it manually (package likely php-mysql or php-mysqlnd), then re-run this script."
     exit 1
   fi
+fi
 
-  # Check mysqli
-  if ! php -m | grep -qi 'mysqli'; then
-    echo "PHP mysqli extension is missing. Attempting to install automatically..."
-    if command -v apt-get >/dev/null 2>&1; then
-      log "Detected Debian/Ubuntu (apt). Installing php-mysql..."
-      apt-get update -y
-      apt-get install -y php-mysql || {
-        echo "ERROR: Unable to install php-mysql via apt-get. Install manually and re-run."
-        exit 1
-      }
-    elif command -v yum >/dev/null 2>&1; then
-      log "Detected RHEL/CentOS (yum). Installing php-mysqlnd..."
-      yum install -y php-mysqlnd || {
-        echo "ERROR: Unable to install php-mysqlnd via yum. Install manually and re-run."
-        exit 1
-      }
-    elif command -v dnf >/dev/null 2>&1; then
-      log "Detected RHEL/Fedora (dnf). Installing php-mysqlnd..."
-      dnf install -y php-mysqlnd || {
-        echo "ERROR: Unable to install php-mysqlnd via dnf. Install manually and re-run."
-        exit 1
-      }
-    else
-      echo "ERROR: Unknown package manager. Please install mysqli extension manually."
-      exit 1
-    fi
+echo "OK: PHP mysqli extension is already enabled for CLI."
 
-    if ! php -m | grep -qi 'mysqli'; then
-      echo "ERROR: mysqli extension still not detected after attempted install."
-      exit 1
-    fi
-  fi
-
-  echo "OK: PHP mysqli extension is already enabled for CLI."
-}
-
-check_wp_cli() {
-  if command -v wp >/dev/null 2>&1; then
-    echo "OK: WP-CLI is available."
-    return
-  fi
-
-  echo "WP-CLI not found. Attempting to install to /usr/local/bin/wp..."
-  curl -s -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
-  chmod +x /usr/local/bin/wp
-
-  if ! command -v wp >/dev/null 2>&1; then
-    echo "ERROR: WP-CLI installation failed. Please install manually and re-run."
+# Check WP-CLI
+if ! command -v wp >/dev/null 2>&1; then
+  echo "WP-CLI not found. Installing to /usr/local/bin/wp ..."
+  curl -s -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || {
+    echo "ERROR: Failed to download wp-cli.phar"
     exit 1
-  fi
+  }
+  chmod +x wp-cli.phar
+  mv wp-cli.phar /usr/local/bin/wp
+fi
 
-  echo "OK: WP-CLI installed."
-}
+echo "OK: WP-CLI is available."
 
-########################
-# Site discovery & selection
-########################
-
-discover_wp_installs() {
-  WP_SITES=()
-  WP_PATHS=()
-
-  # Main CyberPanel-style paths
-  for path in /home/*/public_html; do
-    [ -d "$path" ] || continue
-    if [ -f "$path/wp-config.php" ]; then
-      domain="$(basename "$(dirname "$path")")"
-      WP_SITES+=("$domain")
-      WP_PATHS+=("$path")
-    fi
-  done
-}
-
-choose_site() {
-  discover_wp_installs
-
-  if [ "${#WP_SITES[@]}" -eq 0 ]; then
-    echo "No WordPress installations found under /home/*/public_html."
-    exit 1
-  fi
-
-  echo "Scanning for WordPress installations under /home/*/public_html..."
-  echo
-  echo "Found the following WordPress installs:"
-  echo
-
-  for i in "${!WP_SITES[@]}"; do
-    printf "  [%d] %s  (%s)\n" "$((i+1))" "${WP_SITES[$i]}" "${WP_PATHS[$i]}"
-  done
-
-  echo
-  read -rp "Select site number to clean: " choice
-
-  if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#WP_SITES[@]}" ]; then
-    echo "Invalid choice."
-    exit 1
-  fi
-
-  INDEX=$((choice-1))
-  SELECTED_DOMAIN="${WP_SITES[$INDEX]}"
-  SELECTED_PATH="${WP_PATHS[$INDEX]}"
-
-  echo
-  echo "Selected site:"
-  echo "  Domain: $SELECTED_DOMAIN"
-  echo "  Path  : $SELECTED_PATH"
-  echo
-}
 
 ########################
-# WordPress / WooCommerce details
+# 1. Helper Functions  #
 ########################
-
-detect_table_prefix() {
-  local path="$1"
-  log "Detecting DB table prefix via WP-CLI..."
-  DB_PREFIX="$(wp config get table_prefix --path="$path" --allow-root 2>/dev/null || echo 'wp_')"
-
-  # Normalize, in case WP-CLI printed quotes
-  DB_PREFIX="${DB_PREFIX//\"/}"
-  DB_PREFIX="${DB_PREFIX//\'/}"
-
-  echo "Detected table prefix: $DB_PREFIX"
-}
 
 has_woocommerce() {
   local path="$1"
+  local tp="$2"
+
+  # Check if plugin is installed
   if wp plugin is-installed woocommerce --path="$path" --allow-root >/dev/null 2>&1; then
     return 0
   fi
+
+  # Fallback: check if core Woo tables exist
+  if wp db query "SHOW TABLES LIKE '${tp}woocommerce_order_items';" \
+     --path="$path" --allow-root --skip-column-names 2>/dev/null | \
+     grep -q "${tp}woocommerce_order_items"; then
+    return 0
+  fi
+
   return 1
 }
 
-########################
-# wp_options cleanup (D)
-########################
-
-cleanup_wp_options() {
+generic_cleanup() {
   local path="$1"
   local tp="$2"
 
   echo
-  log "Starting wp_options cleanup (auto, no prompt)..."
+  echo "=============================="
+  echo " Generic safe cleanup (light) "
+  echo "=============================="
 
-  local before_rows
-  before_rows="$(wp db query "SELECT COUNT(*) FROM ${tp}options;" --path="$path" --allow-root --skip-column-names 2>/dev/null || echo "0")"
+  # 1) Clean WooCommerce sessions in wp_options
+  echo "• Deleting WooCommerce session entries from ${tp}options ..."
+  wp db query "DELETE FROM ${tp}options
+               WHERE option_name LIKE '_wc_session_%'
+                  OR option_name LIKE '_wc_session_expires_%';" \
+      --path="$path" --allow-root 2>/dev/null || true
 
-  # 1. Expired / regular transients
-  log " - Deleting transients (_transient_*, _site_transient_*)..."
-  wp db query "DELETE FROM ${tp}options WHERE option_name LIKE '_transient_%' OR option_name LIKE '_site_transient_%';" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+  # 2) Optionally: clean transients (safe but can cause cache rebuild)
+  echo "• Deleting expired transients from ${tp}options ..."
+  wp transient delete-expired --path="$path" --allow-root >/dev/null 2>&1 || true
 
-  # 2. WooCommerce sessions
-  log " - Deleting WooCommerce sessions (_wc_session_*)..."
-  wp db query "DELETE FROM ${tp}options WHERE option_name LIKE '_wc_session_%' OR option_name LIKE '_wc_session_expires_%';" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
-
-  # 3. Stuck cron flag
-  log " - Removing stuck cron flag (doing_cron)..."
-  wp db query "DELETE FROM ${tp}options WHERE option_name = 'doing_cron';" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
-
-  # Optionally, optimize options table
-  log " - Optimizing ${tp}options table..."
-  wp db query "OPTIMIZE TABLE ${tp}options;" --path="$path" --allow-root >/dev/null 2>&1 || true
-
-  local after_rows
-  after_rows="$(wp db query "SELECT COUNT(*) FROM ${tp}options;" --path="$path" --allow-root --skip-column-names 2>/dev/null || echo "0")"
-
-  echo
-  echo "wp_options rows before: $before_rows"
-  echo "wp_options rows after : $after_rows"
-  echo "wp_options cleanup complete."
-  echo
+  echo "Generic cleanup done."
 }
 
-########################
-# WooCommerce 3-year cleanup
-########################
 
-woocommerce_cleanup_3y() {
+woocommerce_cleanup_years() {
   local path="$1"
   local tp="$2"
 
-  if ! has_woocommerce "$path"; then
-    echo "WooCommerce not detected on this site. Skipping 3-year order cleanup."
+  if ! has_woocommerce "$path" "$tp"; then
+    echo
+    echo "WooCommerce not detected on this site. Skipping WooCommerce cleanup."
     return
   fi
 
-  local helper="${tp}old_orders_3y"
+  echo
+  read -rp "How many YEARS of WooCommerce order history would you like to KEEP? (Default: 3): " YEARS
+  YEARS="${YEARS:-3}"
+
+  if ! [[ "$YEARS" =~ ^[0-9]+$ ]]; then
+    echo "Invalid input. Using default 3 years."
+    YEARS=3
+  fi
 
   echo
-  log "Ensuring helper table ${helper} exists..."
+  echo "➡️  Will delete WooCommerce data OLDER than ${YEARS} years."
+  echo "➡️  A full MySQL backup will be created BEFORE any deletion."
+  echo
+
+  # -------------------------
+  # 1️⃣ Detect DB name
+  # -------------------------
+  DB_NAME=$(wp db query "SELECT DATABASE();" --path="$path" --allow-root --skip-column-names 2>/dev/null)
+
+  if [[ -z "$DB_NAME" ]]; then
+    echo "ERROR: Could not detect database name via WP-CLI."
+    echo "Aborting cleanup."
+    return 1
+  fi
+
+  # DOMAIN should be global, but if not set, derive from path
+  if [[ -z "$DOMAIN" ]]; then
+    local dir="${path%/public_html}"
+    DOMAIN="${dir#/home/}"
+  fi
+
+  # -------------------------
+  # 2️⃣ Create MySQL Backup
+  # -------------------------
+  local BACKUP_DIR="/root/wp-backups"
+  mkdir -p "$BACKUP_DIR"
+
+  local BACKUP_FILE="${BACKUP_DIR}/${DOMAIN}-$(date +%Y%m%d-%H%M%S).sql.gz"
+
+  echo "🔄 Creating MySQL dump of DB '${DB_NAME}' -> $BACKUP_FILE"
+
+  if ! mysqldump --single-transaction --quick --routines "$DB_NAME" 2>/dev/null | gzip > "$BACKUP_FILE"; then
+    echo "❌ Backup FAILED — aborting cleanup to avoid data loss."
+    return 1
+  fi
+
+  echo "✅ Backup created successfully."
+  echo
+
+  # Track if any SQL step fails
+  local CLEANUP_ERROR=0
+
+  # -------------------------
+  # 3️⃣ Helper table of old orders
+  # -------------------------
+  local helper="${tp}old_orders_${YEARS}y"
+
+  echo "Ensuring helper table ${helper} exists..."
   wp db query "CREATE TABLE IF NOT EXISTS ${helper} (order_id BIGINT UNSIGNED PRIMARY KEY) ENGINE=InnoDB;" \
-    --path="$path" --allow-root
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
-  echo
-  log "Filling helper table with orders older than 3 years..."
+  echo "Filling helper table with orders older than ${YEARS} years..."
   wp db query "INSERT IGNORE INTO ${helper} (order_id)
-                SELECT ID FROM ${tp}posts
-                WHERE post_type = 'shop_order'
-                  AND post_date < DATE_SUB(CURDATE(), INTERVAL 3 YEAR);" \
-    --path="$path" --allow-root
+               SELECT ID FROM ${tp}posts
+               WHERE post_type = 'shop_order'
+                 AND post_date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);" \
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
   echo
-  log "Counts BEFORE deletion (older than 3 years):"
+  echo "🔎 Counts BEFORE deletion (older than ${YEARS} years):"
+
+  echo "- Orders:"
   wp db query "SELECT COUNT(*) AS old_orders
                FROM ${tp}posts
                WHERE ID IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root
+      --path="$path" --allow-root
 
+  echo "- Order items:"
   wp db query "SELECT COUNT(*) AS old_order_items
                FROM ${tp}woocommerce_order_items oi
                WHERE oi.order_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root
+      --path="$path" --allow-root
 
+  echo "- Order itemmeta:"
   wp db query "SELECT COUNT(*) AS old_order_itemmeta
                FROM ${tp}woocommerce_order_itemmeta oim
                JOIN ${tp}woocommerce_order_items oi
                  ON oi.order_item_id = oim.order_item_id
                WHERE oi.order_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root
+      --path="$path" --allow-root
 
+  echo "- Order comments (notes):"
   wp db query "SELECT COUNT(*) AS old_comments
                FROM ${tp}comments c
                JOIN ${tp}posts p ON p.ID = c.comment_post_ID
                WHERE p.ID IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root
+      --path="$path" --allow-root
 
+  echo "- AutomateWoo logs older than ${YEARS} years:"
   wp db query "SELECT COUNT(*) AS aw_logs_old
-               FROM ${tp}automatewoo_logs l
-               WHERE l.date < DATE_SUB(CURDATE(), INTERVAL 3 YEAR);" \
-    --path="$path" --allow-root || true
+               FROM ${tp}automatewoo_logs
+               WHERE date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);" \
+      --path="$path" --allow-root
 
   echo
-  read -rp "Proceed with deletion of data older than 3 years? (y/N): " confirm
+  read -rp "Proceed with deletion of WooCommerce data older than ${YEARS} years? (y/N): " confirm
   if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-    echo "Aborting 3-year cleanup. No data was deleted."
+    echo "Cancelled by user. Backup kept at: $BACKUP_FILE"
     return
   fi
 
   echo
-  log "Deleting old AutomateWoo log meta..."
+  echo "=============================="
+  echo "  Running WooCommerce cleanup "
+  echo "=============================="
+
+  # -------------------------
+  # 4️⃣ Perform Deletes
+  # -------------------------
+
+  echo "Deleting old AutomateWoo log meta..."
   wp db query "DELETE FROM ${tp}automatewoo_log_meta
                WHERE log_id IN (
                  SELECT id FROM ${tp}automatewoo_logs
-                 WHERE date < DATE_SUB(CURDATE(), INTERVAL 3 YEAR)
+                 WHERE date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR)
                );" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
-  log "Deleting old AutomateWoo logs..."
+  echo "Deleting old AutomateWoo logs..."
   wp db query "DELETE FROM ${tp}automatewoo_logs
-               WHERE date < DATE_SUB(CURDATE(), INTERVAL 3 YEAR);" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+               WHERE date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);" \
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
-  log "Deleting old WooCommerce comments (order notes)..."
+  echo "Deleting WooCommerce comments (order notes) for old orders..."
   wp db query "DELETE c FROM ${tp}comments c
                JOIN ${tp}posts p ON p.ID = c.comment_post_ID
                WHERE p.ID IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
-  log "Deleting old WooCommerce order itemmeta..."
+  echo "Deleting old WooCommerce order itemmeta..."
   wp db query "DELETE oim FROM ${tp}woocommerce_order_itemmeta oim
                JOIN ${tp}woocommerce_order_items oi
                  ON oi.order_item_id = oim.order_item_id
                WHERE oi.order_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
-  log "Deleting old WooCommerce order items..."
+  echo "Deleting old WooCommerce order items..."
   wp db query "DELETE FROM ${tp}woocommerce_order_items
                WHERE order_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
-  log "Deleting old orders from posts + postmeta..."
+  echo "Deleting old WooCommerce orders (postmeta)..."
   wp db query "DELETE FROM ${tp}postmeta
                WHERE post_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
+  echo "Deleting old WooCommerce orders (posts)..."
   wp db query "DELETE FROM ${tp}posts
                WHERE ID IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
-  echo
-  log "Cleaning WooCommerce analytics / lookup tables..."
+  echo "Cleaning WooCommerce analytics tables..."
   wp db query "DELETE FROM ${tp}wc_order_product_lookup
                WHERE order_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
   wp db query "DELETE FROM ${tp}wc_order_stats
                WHERE order_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
-  wp db query "DELETE FROM ${tp}wc_order_tax_lookup
-               WHERE order_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
+  echo "Dropping helper table ${helper}..."
+  wp db query "DROP TABLE IF EXISTS ${helper};" \
+      --path="$path" --allow-root || CLEANUP_ERROR=1
 
-  wp db query "DELETE FROM ${tp}wc_order_coupon_lookup
-               WHERE order_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
 
-  wp db query "DELETE FROM ${tp}wc_order_addresses
-               WHERE order_id IN (SELECT order_id FROM ${helper});" \
-    --path="$path" --allow-root >/dev/null 2>&1 || true
-
+  # -------------------------
+  # 5️⃣ Optimize large tables
+  # -------------------------
   echo
-  log "Dropping helper table ${helper}..."
-  wp db query "DROP TABLE IF EXISTS ${helper};" --path="$path" --allow-root >/dev/null 2>&1 || true
-
-  echo
-  log "Optimizing largest order-related tables..."
+  echo "Optimizing largest WooCommerce-related tables..."
   wp db query "OPTIMIZE TABLE
-                 ${tp}postmeta,
-                 ${tp}posts,
-                 ${tp}comments,
-                 ${tp}woocommerce_order_items,
-                 ${tp}woocommerce_order_itemmeta,
-                 ${tp}wc_order_stats,
-                 ${tp}wc_order_product_lookup;" \
-    --path="$path" --allow-root || true
+      ${tp}postmeta,
+      ${tp}posts,
+      ${tp}comments,
+      ${tp}woocommerce_order_itemmeta,
+      ${tp}woocommerce_order_items,
+      ${tp}wc_order_stats,
+      ${tp}wc_order_product_lookup;" \
+      --path="$path" --allow-root || CLEANUP_ERROR=1
+
+
+  # -------------------------
+  # 6️⃣ Handle backup (delete or keep)
+  # -------------------------
+  if [[ "$CLEANUP_ERROR" -eq 0 ]]; then
+    echo
+    echo "✅ Cleanup finished with NO SQL errors."
+    echo "🗑 Removing backup file: $BACKUP_FILE"
+    rm -f "$BACKUP_FILE"
+  else
+    echo
+    echo "❌ Cleanup encountered one or more SQL errors."
+    echo "🔒 Backup has been preserved at: $BACKUP_FILE"
+  fi
 
   echo
-  log "Counts AFTER deletion (sanity check):"
-  wp db query "SELECT COUNT(*) AS old_orders
-               FROM ${tp}posts
-               WHERE post_type = 'shop_order'
-                 AND post_date < DATE_SUB(CURDATE(), INTERVAL 3 YEAR);" \
-    --path="$path" --allow-root
-
-  wp db query "SELECT COUNT(*) AS old_order_items
-               FROM ${tp}woocommerce_order_items oi
-               JOIN ${tp}posts p ON oi.order_id = p.ID
-               WHERE p.post_type='shop_order'
-                 AND p.post_date < DATE_SUB(CURDATE(), INTERVAL 3 YEAR);" \
-    --path="$path" --allow-root
-
-  wp db query "SELECT COUNT(*) AS old_comments
-               FROM ${tp}comments c
-               JOIN ${tp}posts p ON p.ID = c.comment_post_ID
-               WHERE p.post_type='shop_order'
-                 AND p.post_date < DATE_SUB(CURDATE(), INTERVAL 3 YEAR);" \
-    --path="$path" --allow-root
-
-  echo
-  echo "WooCommerce 3-year cleanup completed."
+  echo "🎉 WooCommerce cleanup (older than ${YEARS} years) finished."
 }
 
-########################
-# DB size helpers
-########################
 
-print_db_sizes() {
-  local path="$1"
-  echo
-  log "Current DB table sizes:"
-  wp db size --all-tables --path="$path" --allow-root
-}
+##############################
+# 2. Detect WP installations #
+##############################
 
-########################
-# Main
-########################
+echo
+echo "Scanning for WordPress installations under /home/*/public_html..."
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "Please run this script as root (sudo)."
+declare -a WP_PATHS
+declare -a WP_DOMAINS
+
+for wpdir in /home/*/public_html; do
+  [ -d "$wpdir" ] || continue
+  if [ -f "$wpdir/wp-config.php" ]; then
+    parent="${wpdir%/public_html}"
+    domain="${parent#/home/}"
+    WP_PATHS+=("$wpdir")
+    WP_DOMAINS+=("$domain")
+  fi
+done
+
+if [ "${#WP_PATHS[@]}" -eq 0 ]; then
+  echo "No WordPress installations found under /home/*/public_html."
   exit 1
 fi
 
-check_php_and_extensions
-check_wp_cli
-choose_site
-
-WP_PATH="$SELECTED_PATH"
-
-detect_table_prefix "$WP_PATH"
-
-print_db_sizes "$WP_PATH"
-
-# D: wp_options cleanup (always, no prompt – your choice: Option 1)
-cleanup_wp_options "$WP_PATH" "$DB_PREFIX"
-
-# WooCommerce 3-year cleanup
-woocommerce_cleanup_3y "$WP_PATH" "$DB_PREFIX"
+echo
+echo "Found the following WordPress installs:"
+for i in "${!WP_PATHS[@]}"; do
+  idx=$((i+1))
+  echo "  [${idx}] ${WP_DOMAINS[$i]}  (${WP_PATHS[$i]})"
+done
 
 echo
-log "Final DB sizes after cleanup:"
+read -rp "Select site number to clean: " CHOICE
+
+if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt "${#WP_PATHS[@]}" ]; then
+  echo "Invalid choice."
+  exit 1
+fi
+
+SEL_INDEX=$((CHOICE-1))
+WP_PATH="${WP_PATHS[$SEL_INDEX]}"
+DOMAIN="${WP_DOMAINS[$SEL_INDEX]}"
+
+echo
+echo "Selected site:"
+echo "  Domain: $DOMAIN"
+echo "  Path  : $WP_PATH"
+
+##############################
+# 3. Detect table prefix     #
+##############################
+
+echo "Detecting DB table prefix via WP-CLI..."
+TABLE_PREFIX=$(wp config get table_prefix --path="$WP_PATH" --allow-root --skip-column-names 2>/dev/null)
+
+if [[ -z "$TABLE_PREFIX" ]]; then
+  echo "WARNING: Could not detect table_prefix via WP-CLI, defaulting to 'wp_'."
+  TABLE_PREFIX="wp_"
+fi
+
+echo "Detected table prefix: $TABLE_PREFIX"
+
+#########################################
+# 4. Show DB size BEFORE, run cleanup   #
+#########################################
+
+echo "Checking current DB size..."
+wp db size --all-tables --path="$WP_PATH" --allow-root
+
+# Light generic cleanup
+generic_cleanup "$WP_PATH" "$TABLE_PREFIX"
+
+# WooCommerce history cleanup with backup
+woocommerce_cleanup_years "$WP_PATH" "$TABLE_PREFIX"
+
+echo
+echo "Final DB size after cleanup:"
 wp db size --all-tables --path="$WP_PATH" --allow-root
 
 echo
