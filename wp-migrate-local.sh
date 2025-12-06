@@ -120,19 +120,30 @@ do_old_server_backup() {
     log "  DB: $db"
     log "  Path: $wp"
 
-    # DB backup using WP-CLI with --allow-root flag
-    if ! wp db export "$DB_FILE" --path="$wp" --allow-root; then
-      err "DB backup failed for $domain"
-      continue
-    fi
-    log "    DB backup: $DB_FILE"
+  # DB backup using WP-CLI with --allow-root flag
+  if ! wp db export "$DB_FILE" --path="$wp" --allow-root; then
+    err "DB backup failed for $domain"
+    continue
+  fi
+  log "    DB backup: $DB_FILE"
 
-    # Files backup using tar
-    if ! tar -czf "$FILES_FILE" -C "$wp" .; then
-      err "Files backup failed for $domain"
-      continue
-    fi
-    log "    Files backup: $FILES_FILE"
+  # Lock the wp-content directory to prevent changes during backup
+  domain_dir="${MIGRATE_ROOT}/${domain}"
+  LOCK_FILE="/var/lock/wp-content-${domain}.lock"
+
+  # Lock the directory for both DB and Files backup using flock
+  (
+    flock -n 200 || exit 1   # Create a lock to ensure the backup is not interrupted
+    log "Backing up wp-content directory for $domain..."
+
+  # Files backup using tar
+  if ! tar -czf "$FILES_FILE" -C "$wp" .; then
+    err "Files backup failed for $domain"
+    continue
+  fi
+  log "    Files backup: $FILES_FILE"
+) 200>$LOCK_FILE  # Lock file for the domain
+
   done
 
   log "Local migration backups created under: $MIGRATE_ROOT"
