@@ -10,13 +10,6 @@ set -euo pipefail
 log()  { echo "[+] $*"; }
 warn() { echo "[-] $*"; }
 
-require_root() {
-  if [[ "$EUID" -ne 0 ]]; then
-    echo "[!] Must be run as root." >&2
-    exit 1
-  fi
-}
-
 discover_wp_paths() {
   mapfile -t WP_PATHS < <(
     find /home -maxdepth 3 -type f -name "wp-config.php" 2>/dev/null \
@@ -25,7 +18,6 @@ discover_wp_paths() {
 }
 
 main() {
-  require_root
   discover_wp_paths
   if [[ ${#WP_PATHS[@]} -eq 0 ]]; then
     warn "No WordPress installations found."
