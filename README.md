@@ -20,13 +20,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-too
   WordPress Maintenance Tools
 ===============================
   [1] DB cleanup (WooCommerce order pruning)
-  [2] Malware scan (Maldet + ClamAV)
-  [3] Backup ALL MySQL/MariaDB databases (local)
+  [2] Run Malware scan (Maldet + ClamAV)
+  [3] Backup WordPress sites (local migration backups)
   [4] Backup ONLY WordPress sites to Dropbox (DB + files)
-  [5] Exit
-  [6] Restore WordPress from Dropbox (DB + files)
-  [7] WordPress migration wizard (local backups)
-  [8] Auto Backups to Dropbox (run now + install daily cron)
-  [9] Fix WordPress file permissions
-  [10] WordPress health audit
-
+  [5] Restore WordPress from Dropbox (DB + files)
+  [6] Run WordPress migration wizard (local backups, server to server)
+  [7] Run Auto Backups Wizard to Dropbox (run now + install daily cron)
+  [8] Check & Fix WordPress file permissions
+  [9] Run WordPress health audit
+  [10] Exit
