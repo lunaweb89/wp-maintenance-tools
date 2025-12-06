@@ -3,9 +3,21 @@
 # wp-migrate-local.sh
 #
 # Local-only WordPress migration wizard:
+#
+# 1) Old Server:
+#    - Create local backups in /root/wp-migrate/<domain>/.
+#    - DB + files, no Dropbox involved.
+#    - Optional rsync push of /root/wp-migrate to a remote NEW server.
+#
+# 2) New Server:
+#    - Restore from local backups in /root/wp-migrate/<domain>/.
+#
+# --backup-only:
+#    - Old server backup mode: let user select site(s), create local backups,
+#      then offer rsync push to new server (ask only for NEW server IP).
+#
 
 set -euo pipefail
-set -x  # Debugging enabled
 
 MIGRATE_ROOT="/root/wp-migrate"
 
@@ -13,16 +25,9 @@ log() { echo "[+] $*"; }
 warn() { echo "[-] $*"; }
 err() { echo "[!] $*" >&2; }
 
-require_root() {
-  if [[ "$EUID" -ne 0 ]]; then
-    err "Must be run as root."
-    exit 1
-  fi
-}
-
 check_tools() {
   local missing=0
-  for c in mysqldump mysql tar gzip rsync stat zcat; do
+  for c in mysqldump mysql tar gzip rsync stat zcat sshpass wp; do
     if ! command -v "$c" >/dev/null 2>&1; then
       err "Required command '$c' not found. Install it (apt-get)."
       missing=1
@@ -47,6 +52,7 @@ do_old_server_backup() {
     return
   fi
 
+  echo
   log "Detected WordPress installations:"
   local i=1
   for wp in "${WP_PATHS[@]}"; do
@@ -57,8 +63,11 @@ do_old_server_backup() {
     ((i++))
   done
 
+  echo
   read -rp "Backup which sites? (e.g. 1 2 5, or A for all): " selection
+
   declare -a SELECTED_WP_PATHS=()
+
   if [[ "$selection" =~ ^[Aa]$ ]]; then
     SELECTED_WP_PATHS=("${WP_PATHS[@]}")
   else
@@ -79,6 +88,7 @@ do_old_server_backup() {
     fi
   fi
 
+  echo
   log "You selected ${#SELECTED_WP_PATHS[@]} site(s) to back up:"
   for wp in "${SELECTED_WP_PATHS[@]}"; do
     local domain
@@ -86,16 +96,12 @@ do_old_server_backup() {
     echo "  - $domain ($wp)"
   done
 
-  if [[ "${1-}" != "--non-interactive" ]]; then
-    read -rp "Create LOCAL migration backups for these site(s) under ${MIGRATE_ROOT}? (y/N): " ok
-    [[ "$ok" =~ ^[Yy]$ ]] || { warn "Cancelled."; return; }
-  fi
-
+  # Backup Process
   local TS
   TS="$(date +%Y%m%d-%H%M%S)"
 
   for wp in "${SELECTED_WP_PATHS[@]}"; do
-    local db domain domain_dir
+    local db domain
     db=$(grep -E "define\\(\\s*'DB_NAME'" "$wp/wp-config.php" 2>/dev/null | awk -F"'" '{print $4}')
     domain="$(basename "$(dirname "$wp")")"
     if [[ -z "$db" ]]; then
@@ -103,92 +109,59 @@ do_old_server_backup() {
       continue
     fi
 
-    domain_dir="${MIGRATE_ROOT}/${domain}"
-    mkdir -p "$domain_dir"
+    local DB_FILE="${MIGRATE_ROOT}/${domain}/${domain}-db-${TS}-migrate.sql.gz"
+    local FILES_FILE="${MIGRATE_ROOT}/${domain}/${domain}-files-${TS}-migrate.tar.gz"
 
-    local DB_FILE="${domain_dir}/${domain}-db-${TS}-migrate.sql.gz"
-    local FILES_FILE="${domain_dir}/${domain}-files-${TS}-migrate.tar.gz"
-
+    echo
     log "Backing up $domain for migration..."
-    if [[ -f /root/.my.cnf ]]; then
-      if ! mysqldump "$db" | gzip > "$DB_FILE"; then
-        err "DB backup failed for $db"
-        rm -f "$DB_FILE"
-        continue
-      fi
-    else
-      if ! mysqldump -u root -p "$db" | gzip > "$DB_FILE"; then
-        err "DB backup failed for $db"
-        rm -f "$DB_FILE"
-        continue
-      fi
-    fi
+    log "  DB: $db"
+    log "  Path: $wp"
 
-    log "DB backup: $DB_FILE"
-    if ! tar -czf "$FILES_FILE" -C "$(dirname "$wp")" "$(basename "$wp")"; then
-      err "Files backup failed for $domain"
-      rm -f "$FILES_FILE"
+    # DB backup using WP-CLI with --allow-root flag
+    if ! wp db export "$DB_FILE" --path="$wp" --allow-root; then
+      err "DB backup failed for $domain"
       continue
     fi
+    log "    DB backup: $DB_FILE"
 
-    log "Files backup: $FILES_FILE"
+    # Files backup using tar
+    if ! tar -czf "$FILES_FILE" -C "$wp" .; then
+      err "Files backup failed for $domain"
+      continue
+    fi
+    log "    Files backup: $FILES_FILE"
   done
 
-  log "Local migration backups created under: ${MIGRATE_ROOT}"
+  log "Local migration backups created under: $MIGRATE_ROOT"
+  log "Next step (for migration):"
+  log "  - Copy $MIGRATE_ROOT to the new server (e.g. rsync or scp)"
 
-  echo "Next step (for migration):"
-  echo "  - Copy ${MIGRATE_ROOT} to the new server (e.g. rsync or scp)"
-
-  echo
-  read -rp "Do you want to PUSH ${MIGRATE_ROOT} to a remote NEW server now via rsync? (y/N): " push
+  # Optionally push to remote server via rsync
+  read -rp "Do you want to PUSH $MIGRATE_ROOT to a remote NEW server now via rsync? (y/N): " push
   if [[ "$push" =~ ^[Yy]$ ]]; then
-    local NEW_IP SSH_PORT
-    echo
     read -rp "Enter NEW server IP (e.g. 65.109.33.94): " NEW_IP
-    if [[ -z "$NEW_IP" ]]; then
-      warn "No IP entered. Skipping rsync push."
-      return
-    fi
-
-    read -rp "Enter SSH port for the new server (default: 22): " SSH_PORT
+    read -rp "Enter SSH port for new server (default 22): " SSH_PORT
     SSH_PORT="${SSH_PORT:-22}"
 
-    local REMOTE_DEST="root@${NEW_IP}"
-    local REMOTE_DIR="/root/wp-migrate"
+    # Optional prompt for SSH password (if SSH keys are not configured)
+    read -sp "Enter SSH password for root@$NEW_IP: " SSH_PASSWORD
+    echo
 
-    log "Pushing ${MIGRATE_ROOT}/  →  ${REMOTE_DEST}:${REMOTE_DIR}/"
-    if ! rsync -avz -e "ssh -p $SSH_PORT" "${MIGRATE_ROOT}/" "${REMOTE_DEST}:${REMOTE_DIR}/"; then
-      err "rsync push failed."
-      return
+    log "Pushing $MIGRATE_ROOT → root@$NEW_IP:/root/wp-migrate/"
+
+    # Use sshpass to handle password if SSH keys are not set
+    if command -v sshpass &>/dev/null; then
+      sshpass -p "$SSH_PASSWORD" rsync -avz -e "ssh -p $SSH_PORT" "$MIGRATE_ROOT" root@$NEW_IP:/root/wp-migrate/
+    else
+      rsync -avz -e "ssh -p $SSH_PORT" "$MIGRATE_ROOT" root@$NEW_IP:/root/wp-migrate/
     fi
-
-    log "rsync push completed."
   fi
 }
 
+# Main entry point
 main() {
-  require_root
   check_tools
-
-  case "${1-}" in
-    --backup-only)
-      do_old_server_backup --non-interactive
-      ;;
-    "")
-      log "Select migration mode:"
-      echo "1) Old Server"
-      echo "2) New Server"
-      read -rp "Choose [1-2]: " mode
-      case "$mode" in
-        1) do_old_server_backup ;;
-        2) do_new_server_restore ;;
-        *) err "Invalid choice." ;;
-      esac
-      ;;
-    *)
-      err "Unknown argument: $1"
-      ;;
-  esac
+  do_old_server_backup
 }
 
 main "$@"
