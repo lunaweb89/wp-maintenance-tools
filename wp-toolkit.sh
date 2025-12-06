@@ -128,4 +128,15 @@ main_menu() {
       8) fix_wp_permissions ;;
       9) health_audit ;;
       10) log "Goodbye."; exit 0 ;;
-      *) warn "Invalid choice*
+      *) warn "Invalid choice. Please enter a number between 1 and 10." ;;
+    esac
+  done
+}
+
+main() {
+  require_root
+  check_core_tools
+  main_menu
+}
+
+main "$@"
