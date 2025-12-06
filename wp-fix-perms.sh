@@ -15,13 +15,6 @@ log()  { echo "[+] $*"; }
 warn() { echo "[-] $*"; }
 err()  { echo "[!] $*" >&2; }
 
-require_root() {
-  if [[ "$EUID" -ne 0 ]]; then
-    err "Must be run as root."
-    exit 1
-  fi
-}
-
 discover_wp_paths() {
   mapfile -t WP_PATHS < <(
     find /home -maxdepth 3 -type f -name "wp-config.php" 2>/dev/null \
@@ -49,7 +42,6 @@ fix_one() {
 }
 
 main() {
-  require_root
   discover_wp_paths
   if [[ ${#WP_PATHS[@]} -eq 0 ]]; then
     warn "No WordPress installations found."
