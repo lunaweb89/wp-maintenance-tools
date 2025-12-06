@@ -27,7 +27,7 @@ err() { echo "[!] $*" >&2; }
 
 check_tools() {
   local missing=0
-  for c in mysqldump mysql tar gzip rsync stat zcat sshpass; do
+  for c in mysqldump mysql tar gzip rsync stat zcat sshpass wp; do
     if ! command -v "$c" >/dev/null 2>&1; then
       err "Required command '$c' not found. Install it (apt-get)."
       missing=1
@@ -117,8 +117,8 @@ do_old_server_backup() {
     log "  DB: $db"
     log "  Path: $wp"
 
-    # DB backup using WP-CLI
-    if ! wp db export "$DB_FILE" --path="$wp"; then
+    # DB backup using WP-CLI with --allow-root
+    if ! wp db export "$DB_FILE" --path="$wp" --allow-root; then
       err "DB backup failed for $domain"
       continue
     fi
