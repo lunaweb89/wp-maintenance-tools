@@ -108,7 +108,10 @@ do_old_server_backup() {
       warn "Skipping $domain — cannot parse DB_NAME."
       continue
     fi
-
+    # Ensure the domain directory exists
+    domain_dir="${MIGRATE_ROOT}/${domain}"
+    mkdir -p "$domain_dir"  # Create directory for the domain
+    
     local DB_FILE="${MIGRATE_ROOT}/${domain}/${domain}-db-${TS}-migrate.sql.gz"
     local FILES_FILE="${MIGRATE_ROOT}/${domain}/${domain}-files-${TS}-migrate.tar.gz"
 
