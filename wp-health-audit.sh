@@ -2,26 +2,17 @@
 #
 # wp-health-audit.sh
 #
-# Lightweight health audit for WordPress installs:
-#   - Owner/group
-#   - Disk usage
-#   - Core directories/files presence
-#   - World-writable files
-#   - Simple suspicious pattern scan (eval/base64_decode in custom paths)
+# Basic health audit for WordPress sites under /home.
 #
 
 set -euo pipefail
 
 log()  { echo "[+] $*"; }
 warn() { echo "[-] $*"; }
-err()  { echo "[!] $*" >&2; }
 
 require_root() {
   if [[ "$EUID" -ne 0 ]]; then
-    err "This script must be run as root."
-    echo "Use the toolkit launcher instead:"
-    echo "  curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh \\"
-    echo "    | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )"
+    echo "[!] Must be run as root." >&2
     exit 1
   fi
 }
@@ -36,66 +27,54 @@ discover_wp_paths() {
 main() {
   require_root
   discover_wp_paths
-
   if [[ ${#WP_PATHS[@]} -eq 0 ]]; then
-    warn "No WordPress installations found under /home."
+    warn "No WordPress installations found."
     exit 0
   fi
 
+  log "Running basic health audit for WordPress sites..."
+
   for wp in "${WP_PATHS[@]}"; do
-    local domain cfg owner group du
-
+    local domain
     domain="$(basename "$(dirname "$wp")")"
-    cfg="${wp}/wp-config.php"
-    owner="$(stat -c '%U' "$wp" 2>/dev/null || echo unknown)"
-    group="$(stat -c '%G' "$wp" 2>/dev/null || echo unknown)"
+
+    echo
+    echo "==============================="
+    echo " Health report for: $domain"
+    echo " Path: $wp"
+    echo "==============================="
+
+    local owner group
+    owner="$(stat -c '%U' "$wp" 2>/dev/null || echo 'unknown')"
+    group="$(stat -c '%G' "$wp" 2>/dev/null || echo 'unknown')"
+    echo "Owner/Group: ${owner}:${group}"
+
+    local du
     du="$(du -sh "$wp" 2>/dev/null | awk '{print $1}')"
+    echo "Disk usage: ${du:-unknown}"
 
-    echo
-    echo "============================================"
-    echo " Site: ${domain}"
-    echo " Path: ${wp}"
-    echo "============================================"
-    echo "Owner:Group  : ${owner}:${group}"
-    echo "Disk usage   : ${du}"
+    [[ -f "$wp/wp-admin/index.php" ]] && echo "Core: wp-admin present" || echo "Core: MISSING wp-admin/index.php"
+    [[ -f "$wp/wp-includes/version.php" ]] && echo "Core: wp-includes/version.php present" || echo "Core: MISSING wp-includes/version.php"
 
-    # Core directories
-    for d in wp-admin wp-includes wp-content; do
-      if [[ -d "${wp}/${d}" ]]; then
-        echo "Core dir     : ${d} [OK]"
-      else
-        echo "Core dir     : ${d} [MISSING]"
-      fi
-    done
-
-    # wp-config.php
-    if [[ -f "${cfg}" ]]; then
-      echo "wp-config.php: [OK]"
+    local uploads="${wp}/wp-content/uploads"
+    if [[ -d "$uploads" ]]; then
+      echo "Uploads dir: present at $uploads"
     else
-      echo "wp-config.php: [MISSING]"
+      echo "Uploads dir: MISSING ($uploads)"
     fi
 
-    # World-writable files
     local ww_count
-    ww_count="$(find "$wp" -type f -perm -0002 2>/dev/null | wc -l | awk '{print $1}')"
-    echo "World-writable files: ${ww_count}"
+    ww_count="$(find "$wp" -type f -perm -0002 2>/dev/null | wc -l)"
+    echo "World-writable files: $ww_count"
 
-    if (( ww_count > 0 )); then
-      echo "  (Consider fixing these with the 'Fix permissions' tool.)"
-    fi
-
-    # Very basic suspicious scan (exclude wp-admin/wp-includes)
-    echo
-    echo "Suspicious pattern scan (eval/base64_decode) in custom code:"
-    find "$wp" -type f -name '*.php' \
-      ! -path "${wp}/wp-admin/*" \
-      ! -path "${wp}/wp-includes/*" \
-      -print0 2>/dev/null \
-      | xargs -0 grep -En 'eval\(|base64_decode\(' 2>/dev/null \
-      | head -n 20 || echo "  No obvious suspicious patterns found in first 20 matches."
-
-    echo
+    local sus_count
+    sus_count="$(grep -Rsl --exclude-dir=wp-includes --exclude-dir=wp-admin -E "eval\\(" "$wp" 2>/dev/null | wc -l)"
+    sus_count=$((sus_count + $(grep -Rsl --exclude-dir=wp-includes --exclude-dir=wp-admin -E "base64_decode\\(" "$wp" 2>/dev/null | wc -l)))
+    echo "Suspicious PHP files (eval/base64_decode): $sus_count (manual review recommended if > 0)"
   done
+
+  echo
+  log "Health audit completed."
 }
 
 main "$@"
