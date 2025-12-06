@@ -38,13 +38,6 @@ err() {
   echo -e "${COLOR_RED}[!] $*${COLOR_RESET}" >&2
 }
 
-require_root() {
-  if [[ "$EUID" -ne 0 ]]; then
-    err "This script must be run as root (e.g. sudo bash ...)."
-    exit 1
-  fi
-}
-
 # ---------- Environment checks ----------
 
 check_php_mysqli() {
@@ -178,7 +171,6 @@ table_exists() {
 # ---------- Main logic ----------
 
 main() {
-  require_root
   check_php_mysqli
   check_wp_cli
   discover_wp_installs
