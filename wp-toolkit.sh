@@ -34,6 +34,7 @@ log()  { echo -e "${COLOR_BLUE}[+]${COLOR_RESET} $*"; }
 warn() { echo -e "${COLOR_YELLOW}[-]${COLOR_RESET} $*"; }
 err()  { echo -e "${COLOR_RED}[!] $*${COLOR_RESET}" >&2; }
 
+# Ensure the script is run as root
 require_root() {
   if [[ "$EUID" -ne 0 ]]; then
     err "This toolkit must be run as root."
@@ -51,6 +52,7 @@ check_core_tools() {
   fi
 }
 
+# Functions for each action:
 run_cleanup_script() {
   log "Launching DB cleanup tool (cleanup-script.sh)..."
   bash <(curl -fsSL "${REPO_BASE}/cleanup-script.sh")
@@ -126,15 +128,4 @@ main_menu() {
       8) fix_wp_permissions ;;
       9) health_audit ;;
       10) log "Goodbye."; exit 0 ;;
-      *) warn "Invalid choice. Please enter a number between 1 and 10." ;;
-    esac
-  done
-}
-
-main() {
-  require_root
-  check_core_tools
-  main_menu
-}
-
-main "$@"
+      *) warn "Invalid choice*
