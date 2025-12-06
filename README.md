@@ -1,4 +1,3 @@
-README.md (Full Copy-Paste Version)
 # WordPress Maintenance Toolkit
 
 A complete shell-based toolkit to manage, secure, back up, restore, and migrate multiple WordPress sites on any Linux server (CyberPanel-style `/home/<domain>/public_html` layout).
@@ -14,6 +13,7 @@ Copy/paste this single command on any server:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh \
   | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )
+
 
 
 The launcher will:
