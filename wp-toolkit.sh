@@ -111,9 +111,7 @@ main_menu() {
     echo "  [10] Exit"
     echo
 
-    # Debugging: Echo input before processing
     read -rp "Select an option [1-10]: " CHOICE
-    echo "DEBUG: You entered: '$CHOICE'"  # Debug line to check input value
 
     case "$CHOICE" in
       1) run_cleanup_script ;;
