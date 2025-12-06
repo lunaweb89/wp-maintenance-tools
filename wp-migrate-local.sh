@@ -168,17 +168,20 @@ do_old_server_backup() {
   echo "Next step (for migration):"
   echo "  - Copy ${MIGRATE_ROOT} to the new server (e.g. rsync or scp)"
 
-  # NEW: offer to push /root/wp-migrate to a remote server via rsync (IP-only)
+   # NEW: offer to push /root/wp-migrate to a remote server via rsync (IP and port)
   echo
   read -rp "Do you want to PUSH ${MIGRATE_ROOT} to a remote NEW server now via rsync? (y/N): " push
   if [[ "$push" =~ ^[Yy]$ ]]; then
-    local NEW_IP
+    local NEW_IP SSH_PORT
     echo
     read -rp "Enter NEW server IP (e.g. 65.109.33.94): " NEW_IP
     if [[ -z "$NEW_IP" ]]; then
       warn "No IP entered. Skipping rsync push."
       return
     fi
+
+    read -rp "Enter SSH port for the new server (default: 22): " SSH_PORT
+    SSH_PORT="${SSH_PORT:-22}"  # Set default to 22 if no input provided
 
     local REMOTE_DEST="root@${NEW_IP}"
     local REMOTE_DIR="/root/wp-migrate"
@@ -187,14 +190,14 @@ do_old_server_backup() {
     log "Pushing ${MIGRATE_ROOT}/  →  ${REMOTE_DEST}:${REMOTE_DIR}/"
     log "You will be prompted for the SSH password for root@${NEW_IP} (unless keys are set)."
 
-    if ! rsync -avz "${MIGRATE_ROOT}/" "${REMOTE_DEST}:${REMOTE_DIR}/"; then
+    # Update rsync command to use the custom SSH port
+    if ! rsync -avz -e "ssh -p $SSH_PORT" "${MIGRATE_ROOT}/" "${REMOTE_DEST}:${REMOTE_DIR}/"; then
       err "rsync push failed. Please check SSH connectivity and rerun the push manually."
       return
     fi
 
     log "rsync push completed."
   fi
-}
 
 do_new_server_restore() {
   if [[ ! -d "$MIGRATE_ROOT" ]]; then
