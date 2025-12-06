@@ -1,20 +1,18 @@
-# wp-maintenance-tools
+# WordPress Maintenance Toolkit
 
-A modular WordPress server maintenance toolkit for Ubuntu + CyberPanel style hosting.
+A collection of shell tools to manage, migrate, and protect multiple WordPress sites on a single server (typically `/home/<domain>/public_html` layout such as CyberPanel).
 
-> **Goal:** Give you CLI tools to back up, restore, migrate, scan, and audit all WordPress installs under `/home` safely and repeatably.
-
-All tools are designed to be run as **root** (e.g. `sudo -i`).
+All scripts are designed to be run **as root** (direct root login or via `sudo`), using one **universal launcher**.
 
 ---
 
-## 1. Quick Start
+## 🚀 Universal Launcher (root or sudo user)
 
-Run the main menu directly from GitHub:
+Run this on **any server** (old or new), as root *or* as a sudo-capable user:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-tools.sh)
-
+curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh \
+  | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )
 
 ===============================
   WordPress Maintenance Tools
@@ -29,3 +27,4 @@ bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-too
   [8] Check & Fix WordPress file permissions
   [9] Run WordPress health audit
   [10] Exit
+
