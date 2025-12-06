@@ -2,17 +2,17 @@
 #
 # wp-restore-dropbox.sh
 #
-# Restore one WordPress site from Dropbox:
-#   - Uses: dropbox:wp-backups/<domain>/
-#   - Picks the latest DB + files
-#   - Parses DB_NAME/DB_USER/DB_PASSWORD from wp-config.php
-#   - Creates DB + user
-#   - Imports DB + syncs files into /home/<domain>/public_html
+# Restore WordPress site (DB + files) from Dropbox via rclone.
+#
+# Layout expected:
+#   dropbox:wp-backups/<domain>/<domain>-db-YYYYMMDD-HHMMSS-*.sql.gz
+#   dropbox:wp-backups/<domain>/<domain>-files-YYYYMMDD-HHMMSS-*.tar.gz
+#
+# - Auto-detects DB name/user/pass from wp-config.php in the archive
+# - Restores to /home/<domain>/public_html
 #
 
 set -euo pipefail
-
-DROPBOX_REMOTE="dropbox:wp-backups"
 
 log()  { echo "[+] $*"; }
 warn() { echo "[-] $*"; }
@@ -20,7 +20,10 @@ err()  { echo "[!] $*" >&2; }
 
 require_root() {
   if [[ "$EUID" -ne 0 ]]; then
-    err "Must be run as root."
+    err "This script must be run as root."
+    echo "Use the toolkit launcher instead:"
+    echo "  curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh \\"
+    echo "    | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )"
     exit 1
   fi
 }
@@ -29,7 +32,7 @@ check_tools() {
   local missing=0
   for c in rclone mysql rsync tar zcat stat; do
     if ! command -v "$c" >/dev/null 2>&1; then
-      err "Required command '$c' not found. Please install it."
+      err "Required command '$c' not found. Install with apt-get."
       missing=1
     fi
   done
@@ -37,26 +40,24 @@ check_tools() {
     exit 1
   fi
 
-  if ! rclone listremotes 2>/dev/null | grep -q "^dropbox:"; then
+  if ! rclone listremotes 2>/dev/null | grep -q '^dropbox:'; then
     err "rclone remote 'dropbox' not configured."
-    echo "Run: rclone config   and create 'dropbox' remote."
+    echo "Configure it first with: rclone config"
     exit 1
   fi
 }
 
-main() {
-  require_root
-  check_tools
+select_domain_from_dropbox() {
+  # List domain folders under dropbox:wp-backups
+  mapfile -t DOMAINS < <(rclone lsd "dropbox:wp-backups" 2>/dev/null | awk '{print $5}' | sort)
 
-  log "Listing sites under ${DROPBOX_REMOTE}..."
-  mapfile -t DOMAINS < <(rclone lsd "$DROPBOX_REMOTE" 2>/dev/null | awk '{print $5}' | sort)
   if [[ ${#DOMAINS[@]} -eq 0 ]]; then
-    warn "No site folders found in Dropbox wp-backups."
-    exit 0
+    err "No domain folders found under dropbox:wp-backups"
+    exit 1
   fi
 
   echo
-  echo "Available backup sites:"
+  echo "Available domains in Dropbox backups:"
   local i=1
   for d in "${DOMAINS[@]}"; do
     echo "  [$i] $d"
@@ -66,59 +67,70 @@ main() {
 
   local sel
   while :; do
-    read -rp "Select a site to restore [1-${#DOMAINS[@]}]: " sel
+    read -rp "Select a domain to restore [1-${#DOMAINS[@]}]: " sel
     [[ "$sel" =~ ^[0-9]+$ ]] || { warn "Enter a number."; continue; }
     (( sel >= 1 && sel <= ${#DOMAINS[@]} )) || { warn "Out of range."; continue; }
     break
   done
 
-  local domain="${DOMAINS[sel-1]}"
-  local LOCAL_RESTORE_DIR="/root/wp-restore/${domain}"
-  mkdir -p "$LOCAL_RESTORE_DIR"
+  RESTORE_DOMAIN="${DOMAINS[sel-1]}"
+}
+
+main() {
+  require_root
+  check_tools
+  select_domain_from_dropbox
+
+  local REMOTE_DIR="dropbox:wp-backups/${RESTORE_DOMAIN}"
+
+  # List backups and pick latest DB and files by name
+  mapfile -t DB_FILES < <(rclone lsf "$REMOTE_DIR" 2>/dev/null | grep '-db-' | sort)
+  mapfile -t FILES_FILES < <(rclone lsf "$REMOTE_DIR" 2>/dev/null | grep '-files-' | sort)
+
+  if [[ ${#DB_FILES[@]} -eq 0 || ${#FILES_FILES[@]} -eq 0 ]]; then
+    err "Could not find DB and files backups for ${RESTORE_DOMAIN} in ${REMOTE_DIR}"
+    exit 1
+  fi
+
+  local LATEST_DB="${DB_FILES[-1]}"
+  local LATEST_FILES="${FILES_FILES[-1]}"
 
   echo
-  log "Syncing backups for $domain from Dropbox..."
-  if ! rclone sync "${DROPBOX_REMOTE}/${domain}" "$LOCAL_RESTORE_DIR"; then
-    err "rclone sync failed."
-    exit 1
-  fi
-
-  local latest_db latest_files
-  latest_db="$(ls -1t "${LOCAL_RESTORE_DIR}/${domain}-db-"*.sql.gz 2>/dev/null | head -n1 || true)"
-  latest_files="$(ls -1t "${LOCAL_RESTORE_DIR}/${domain}-files-"*.tar.gz 2>/dev/null | head -n1 || true)"
-
-  if [[ -z "$latest_db" || -z "$latest_files" ]]; then
-    err "Could not find DB and files backups for $domain in ${LOCAL_RESTORE_DIR}."
-    exit 1
-  fi
-
-  log "Using DB backup   : $latest_db"
-  log "Using FILES backup: $latest_files"
+  log "Using DB backup   : ${REMOTE_DIR}/${LATEST_DB}"
+  log "Using FILES backup: ${REMOTE_DIR}/${LATEST_FILES}"
 
   local TMP_DIR
-  TMP_DIR="$(mktemp -d "/tmp/wp-restore-${domain}-XXXXXX")"
+  TMP_DIR="$(mktemp -d "/tmp/wp-restore-dropbox-${RESTORE_DOMAIN}-XXXXXX")"
 
-  if ! tar -xzf "$latest_files" -C "$TMP_DIR"; then
+  log "Downloading backups from Dropbox to temp dir..."
+  rclone copy "${REMOTE_DIR}/${LATEST_DB}" "$TMP_DIR" >/dev/null 2>&1
+  rclone copy "${REMOTE_DIR}/${LATEST_FILES}" "$TMP_DIR" >/dev/null 2>&1
+
+  local LOCAL_DB="${TMP_DIR}/${LATEST_DB}"
+  local LOCAL_FILES="${TMP_DIR}/${LATEST_FILES}"
+
+  log "Extracting files archive..."
+  if ! tar -xzf "$LOCAL_FILES" -C "$TMP_DIR"; then
     err "Failed to extract files archive."
     rm -rf "$TMP_DIR"
     exit 1
   fi
 
   local config
-  config="$(find "$TMP_DIR" -maxdepth 4 -name 'wp-config.php' | head -n1 || true)"
+  config="$(find "$TMP_DIR" -maxdepth 5 -name 'wp-config.php' | head -n1 || true)"
   if [[ -z "$config" ]]; then
-    err "Could not find wp-config.php in backup."
+    err "Could not find wp-config.php in extracted files."
     rm -rf "$TMP_DIR"
     exit 1
   fi
 
   local DB_NAME DB_USER DB_PASS
-  DB_NAME="$(grep -E "define\\(\\s*'DB_NAME'" "$config" | awk -F"'" '{print $4}')"
-  DB_USER="$(grep -E "define\\(\\s*'DB_USER'" "$config" | awk -F"'" '{print $4}')"
-  DB_PASS="$(grep -E "define\\(\\s*'DB_PASSWORD'" "$config" | awk -F"'" '{print $4}')"
+  DB_NAME="$(grep -E "define\(\s*'DB_NAME'" "$config" | awk -F"'" '{print $4}')"
+  DB_USER="$(grep -E "define\(\s*'DB_USER'" "$config" | awk -F"'" '{print $4}')"
+  DB_PASS="$(grep -E "define\(\s*'DB_PASSWORD'" "$config" | awk -F"'" '{print $4}')"
 
   if [[ -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASS" ]]; then
-    err "Failed to parse DB_NAME/DB_USER/DB_PASSWORD from wp-config.php"
+    err "Failed to parse DB credentials from wp-config.php."
     rm -rf "$TMP_DIR"
     exit 1
   fi
@@ -130,21 +142,21 @@ main() {
   echo "  DB_PASS: (hidden)"
 
   echo
-  read -rp "Proceed with RESTORE (may overwrite /home/${domain}/public_html)? (y/N): " ok
+  read -rp "Proceed with RESTORE for ${RESTORE_DOMAIN} on THIS server? (y/N): " ok
   [[ "$ok" =~ ^[Yy]$ ]] || { warn "Cancelled."; rm -rf "$TMP_DIR"; exit 0; }
 
   mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" || true
   mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';" || true
   mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;" || true
 
-  log "Importing DB from $latest_db ..."
-  if ! zcat "$latest_db" | mysql "$DB_NAME"; then
+  log "Importing DB from ${LOCAL_DB} ..."
+  if ! zcat "$LOCAL_DB" | mysql "$DB_NAME"; then
     err "Database import failed."
     rm -rf "$TMP_DIR"
     exit 1
   fi
 
-  local TARGET_ROOT="/home/${domain}/public_html"
+  local TARGET_ROOT="/home/${RESTORE_DOMAIN}/public_html"
   mkdir -p "$TARGET_ROOT"
 
   local WP_EXTRACT_ROOT
@@ -156,11 +168,10 @@ main() {
   local owner group
   owner="$(stat -c '%U' "$TARGET_ROOT" 2>/dev/null || echo root)"
   group="$(stat -c '%G' "$TARGET_ROOT" 2>/dev/null || echo root)"
-
   log "Applying ownership ${owner}:${group} ..."
   chown -R "${owner}:${group}" "$TARGET_ROOT" 2>/dev/null || true
 
-  log "Adjusting permissions..."
+  log "Setting permissions..."
   find "$TARGET_ROOT" -type d -exec chmod 755 {} \; 2>/dev/null || true
   find "$TARGET_ROOT" -type f -exec chmod 644 {} \; 2>/dev/null || true
   [[ -f "$TARGET_ROOT/wp-config.php" ]] && chmod 600 "$TARGET_ROOT/wp-config.php" 2>/dev/null || true
@@ -168,8 +179,7 @@ main() {
   rm -rf "$TMP_DIR"
 
   echo
-  log "Restore completed for $domain."
-  echo "Please test the site in browser and confirm."
+  log "Restore from Dropbox completed for ${RESTORE_DOMAIN}."
 }
 
 main "$@"
