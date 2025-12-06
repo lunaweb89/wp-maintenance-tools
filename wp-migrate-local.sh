@@ -163,17 +163,19 @@ if [[ "$push" =~ ^[Yy]$ ]]; then
   SSH_PORT="${SSH_PORT:-22}"
 
   # Optional prompt for SSH password (if SSH keys are not configured)
-  read -sp "Enter SSH password for root@$NEW_IP: " SSH_PASSWORD
-  echo
-
   log "Pushing $MIGRATE_ROOT → root@$NEW_IP:/root/wp-migrate/"
+  log "You may see a host key fingerprint prompt (first time only), then a password prompt."
 
-  # Modify this line to use StrictHostKeyChecking=ask to prompt for host key
-  # Use sshpass to handle password if SSH keys are not set
-  if command -v sshpass &>/dev/null; then
-    sshpass -p "$SSH_PASSWORD" rsync -avz -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=ask" "$MIGRATE_ROOT" root@$NEW_IP:/root/wp-migrate/
-  else
-    rsync -avz -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=ask" "$MIGRATE_ROOT" root@$NEW_IP:/root/wp-migrate/
+  # First-time SSH to ensure host key is added (optional but nice UX)
+  ssh -p "$SSH_PORT" root@"$NEW_IP" "echo 'SSH connectivity OK from $(hostname)'" || {
+    err "SSH connectivity test failed. Aborting rsync."
+    return
+  }
+
+  # Now run rsync (host key already accepted above)
+  if ! rsync -avz -e "ssh -p $SSH_PORT" "$MIGRATE_ROOT"/ root@"$NEW_IP":/root/wp-migrate/; then
+    err "rsync push failed. Please check SSH connectivity and rerun."
+    return
   fi
 fi
 }
