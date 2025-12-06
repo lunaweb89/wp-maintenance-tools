@@ -1,37 +1,46 @@
-# WordPress Maintenance Toolkit
+WordPress Maintenance Toolkit
 
-A complete shell-based toolkit to manage, secure, back up, restore, and migrate multiple WordPress sites on any Linux server (CyberPanel-style `/home/<domain>/public_html` layout).
+A complete shell-based toolkit to manage, secure, back up, restore, and migrate multiple WordPress sites on any Linux server (CyberPanel-style /home/<domain>/public_html layout).
 
-All tools run from **one universal launcher**, whether you log in as **root** or a **sudo user**.
+All tools run from one universal launcher, whether you log in as root or as a sudo user.
 
----
-
-## 🚀 Universal Launcher (root OR sudo)
+🚀 Universal Launcher (root OR sudo)
 
 Copy/paste this single command on any server:
 
-```bash
 curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh \
   | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )
 
+What the launcher does:
 
+Detects whether you're running as root or sudo user
 
-The launcher will:
+Auto-elevates safely
 
-Detect whether you are root or sudo user
+Downloads and runs the toolkit menu
 
-Elevate automatically
-
-Load the toolkit menu
-
-Execute all helper scripts as root safely
+Ensures all helper scripts run with correct privileges
 
 📦 Requirements
 System tools
 
-curl, bash, tar, gzip, find, rsync
+curl
 
-MySQL tools: mysql, mysqldump
+bash
+
+tar
+
+gzip
+
+find
+
+rsync
+
+Database tools
+
+mysql
+
+mysqldump
 
 Malware scanning
 
@@ -39,17 +48,13 @@ maldet
 
 clamav (clamscan)
 
-Dropbox support
+Dropbox backups (via rclone)
 
-rclone
-
-Must have a configured remote called dropbox
-
-Run setup once:
+You must configure a Dropbox remote named dropbox:
 
 rclone config
 
-Directory structure on Dropbox:
+Expected Dropbox Folder Structure
 Dropbox/
   wp-backups/
     maslike.es/
@@ -57,15 +62,12 @@ Dropbox/
     pluslike.net/
 
 
-Backups will be stored like:
+Backups stored as:
 
-wp-backups/<domain>/<domain>-db-YYYYMMDD-HHMMSS-<tag>.sql.gz
-wp-backups/<domain>/<domain>-files-YYYYMMDD-HHMMSS-<tag>.tar.gz
+wp-backups/<domain>/<domain>-db-YYYYMMDD-HHMMSS.sql.gz
+wp-backups/<domain>/<domain>-files-YYYYMMDD-HHMMSS.tar.gz
 
 🧰 Main Toolkit Menu
-
-After launching, you will see:
-
 ===============================
   WordPress Maintenance Tools
 ===============================
@@ -80,76 +82,65 @@ After launching, you will see:
   [9] Run WordPress health audit
   [10] Exit
 
-📝 Option Details
+📝 Option Details With Full Explanations
 1️⃣ DB Cleanup (WooCommerce order pruning)
 
 Runs cleanup-script.sh
 
 Removes old WooCommerce orders
 
-Optimizes tables
+Optimizes database tables
 
-Optional indexing depending on your settings
+Optional indexing
 
 2️⃣ Malware Scan (Maldet + ClamAV)
 
 Runs wp-malware-scan.sh
+
 Features:
 
-Detects all WP installs under /home
+Auto-detects WordPress installations
 
-Select sites to scan OR scan all
+Scan selected sites OR all sites
 
-Runs Maldet + ClamAV
+Uses Maldet + ClamAV
 
-Logs saved in /var/log/wp-malware-scan/
+Logs stored in /var/log/wp-malware-scan/
 
-Summary clearly shows: CLEAN or INFECTED
+If malware is detected:
 
-If infected files are found:
+Script prints infected file list
 
-The script prints a detected files section
-
-You can paste that into ChatGPT for cleanup
+You can paste it into ChatGPT for clean-up instructions
 
 3️⃣ Backup WordPress Sites (Local Migration Backups)
 
-Runs: wp-migrate-local.sh --backup-only
+Runs wp-migrate-local.sh --backup-only
 
-Flow:
-
-Detect WP sites.
-
-You select:
-
-Specific sites (e.g. 1 3)
-
-Or A for all sites
-
-Creates local backup set:
+Creates:
 
 /root/wp-migrate/<domain>/
   <domain>-db-YYYYMMDD-HHMMSS-migrate.sql.gz
   <domain>-files-YYYYMMDD-HHMMSS-migrate.tar.gz
 
 
-Optional:
+After backup, script asks:
 
-Script asks if you want to PUSH backups to new server via rsync
+Do you want to push backups to a NEW server now via rsync?
 
-Only enter new server IP
 
-rsync target: /root/wp-migrate/
+If YES → You only enter new server IP
+Backups are sent to:
 
-This is your OLD SERVER → NEW SERVER migration backup set.
+root@<IP>:/root/wp-migrate/
 
-4️⃣ Backup Only WordPress Sites to Dropbox
+4️⃣ Backup WordPress Sites To Dropbox (DB + Files)
 
-Runs: wp-backup-dropbox.sh
+Runs wp-backup-dropbox.sh
 
 Features:
 
-Select multiple WP sites OR all
+Select 1 site, many sites, or all
 
 Creates temporary DB + file archives
 
@@ -158,9 +149,9 @@ Uploads to:
 dropbox:wp-backups/<domain>/
 
 
-No local backup is kept
+Temp files are deleted afterward.
 
-Optional rotation:
+Optional retention:
 
 Keep last 7 DB backups
 
@@ -168,148 +159,141 @@ Keep last 7 file backups
 
 5️⃣ Restore WordPress From Dropbox (DB + Files)
 
-Runs: wp-restore-dropbox.sh
+Runs wp-restore-dropbox.sh
 
-Process:
+Restore flow:
 
-Script lists domains available in Dropbox.
+Lists domains found in Dropbox
 
-You choose a domain.
+You select domain
 
-Script restores:
+Script fetches latest DB + file backup
 
-Latest DB + file backup
+Reads DB credentials from wp-config.php
 
-Detects DB credentials from wp-config.php
+Creates database + user automatically
 
-Recreates DB + user automatically
-
-Restores files to:
+Restores files into:
 
 /home/<domain>/public_html/
 
 
-Fixes ownership & permissions.
+Fixes all permissions
 
-Result: fully restored site.
+Result: A fully restored, working WordPress site
 
 6️⃣ WordPress Migration Wizard (Server → Server)
 
-Runs: wp-migrate-local.sh
+Runs wp-migrate-local.sh
 
-Two modes:
+Mode 1 — Old Server
 
-Mode 1 — OLD SERVER
+Select domains
 
-Detect sites
+Create migration backups
 
-You select domains
+Optional: push backups to new server
 
-Creates migration backups
+Mode 2 — New Server
 
-Optionally rsyncs to new server
+Detect backups under /root/wp-migrate/<domain>/
 
-Mode 2 — NEW SERVER
+Restore DB + files
 
-Reads backups from /root/wp-migrate/<domain>/
+Fix permissions
 
-Restores:
+7️⃣ Auto Backups To Dropbox (Wizard + Cron)
 
-DB
+Runs wp-backup-dropbox.sh --auto-setup
 
-Files
+Creates:
 
-Permissions
-
-This is the complete migration workflow.
-
-7️⃣ Auto Backups To Dropbox (Wizard + Cron Installer)
-
-Runs: wp-backup-dropbox.sh --auto-setup
-
-Flow:
-
-Creates IMMEDIATE backup of all WP sites to Dropbox
+Immediate backup of all WordPress sites
 
 Installs a daily cronjob (default 03:30)
 
-Cronjob runs silent mode:
+Cron runs silently:
+
 wp-backup-dropbox.sh --auto-run
 
-All backups are remote-only.
-No local backup files remain.
+
+Backups are remote-only (no local files remain).
 
 8️⃣ Check & Fix WordPress File Permissions
 
-Runs: wp-fix-perms.sh
+Runs wp-fix-perms.sh
 
 Fixes:
 
-File permissions
+directory permissions → 755
 
-Directory permissions
+file permissions → 644
 
 wp-config.php → 600
 
-Ownership based on CyberPanel account
+ownership based on CyberPanel user
 
 9️⃣ WordPress Health Audit
 
-Runs: wp-health-audit.sh
+Runs wp-health-audit.sh
 
 Checks:
 
-Domain, disk usage
+wp-admin / wp-includes / wp-content
 
-wp-admin, wp-includes, wp-content presence
+Disk usage
 
-world-writable files
+Suspicious PHP functions
 
-suspicious patterns (eval(, base64_decode(, etc.)
+PHP version
 
-PHP version checks
+World-writable files
 
-file structure integrity
+File structure integrity
 
-Great for quick diagnosis.
+🔁 Typical Usage Examples
+✔ Full Migration Example (pluslike.net)
 
-🔁 Typical Usage
-✔ Migration Example (pluslike.net)
-Old server:
+Old server
 
-Menu → [3] Backup WP sites → select pluslike.net → Push to new server
+[3] Backup WP sites
 
-New server:
+Select pluslike.net
 
-Menu → [6] Migration wizard → Mode 2 → Restore pluslike.net
+Choose Yes to rsync to new server
 
-Done. Site live.
+New server
+
+[6] Migration wizard
+
+Mode 2
+
+Select pluslike.net
+
+➡️ Migration complete
 
 ✔ Daily Dropbox Auto Backup
 
-Menu → [7] Run Auto Backups Wizard
+Menu → [7] Auto Backups Wizard
 
-Immediately performs a backup
+Runs backup immediately
 
 Installs daily cron
 
-No local files stored
+No local backup retention
 
-⚠️ Safety Notes
+⚠ Safety Notes
 
-Restores overwrite files and databases
+Restore operations overwrite files + DB
 
-Always test on a staging server first
+Test migrations/restores on staging first
 
-Ensure Dropbox remote (rclone) is configured before using Options 4, 5, 7
+Ensure rclone Dropbox remote is configured before using options 4, 5, 7
 
-✔ Ready to Use
-
-Paste the universal launcher anywhere and the toolkit works:
-
+✔ Universal Launcher (Quick Copy)
 curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh \
   | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )
 
 🧑‍💻 Maintainer
 
-This toolkit was engineered for automated, safe, repeatable WordPress management across multiple servers
+This toolkit was engineered for safe, automated, repeatable WordPress management across multiple servers.
