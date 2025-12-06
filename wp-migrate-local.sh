@@ -7,7 +7,7 @@
 # 1) Old Server:
 #    - Create local backups in /root/wp-migrate/<domain>/
 #    - DB + files, no Dropbox involved
-#    - (NEW) Optional rsync push of /root/wp-migrate to a remote NEW server
+#    - Optional rsync push of /root/wp-migrate to a remote NEW server
 #
 # 2) New Server:
 #    - Restore from local backups in /root/wp-migrate/<domain>/
@@ -165,12 +165,12 @@ do_old_server_backup() {
 
   echo
   log "Local migration backups created under: ${MIGRATE_ROOT}"
-  echo "Next step (manual if you skip auto-push):"
+  echo "Next step (for migration):"
   echo "  - Copy ${MIGRATE_ROOT} to the new server (e.g. rsync or scp)"
 
   # NEW: offer to push /root/wp-migrate to a remote server via rsync
   echo
-  read -rp "Do you want to PUSH /root/wp-migrate to a remote NEW server now via rsync? (y/N): " push
+  read -rp "Do you want to PUSH ${MIGRATE_ROOT} to a remote NEW server now via rsync? (y/N): " push
   if [[ "$push" =~ ^[Yy]$ ]]; then
     local REMOTE_DEST REMOTE_DIR
     echo
@@ -186,7 +186,6 @@ do_old_server_backup() {
     log "Pushing ${MIGRATE_ROOT}/  →  ${REMOTE_DEST}:${REMOTE_DIR}/"
     log "If this hangs, check firewall/SSH on the remote server."
 
-    # Ensure trailing slash behavior for rsync (copy contents into REMOTE_DIR)
     if ! rsync -avz "${MIGRATE_ROOT}/" "${REMOTE_DEST}:${REMOTE_DIR}/"; then
       err "rsync push failed. Please check SSH connectivity and rerun the push manually."
       return
