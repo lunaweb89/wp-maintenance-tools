@@ -15,9 +15,8 @@
 #   [9] Run WordPress health audit
 #   [10] Exit
 #
-# Universal launcher (root or sudo user):
-#   curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh \
-#     | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )
+# Run directly from GitHub (as root):
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh)
 #
 
 set -euo pipefail
@@ -34,25 +33,20 @@ log()  { echo -e "${COLOR_BLUE}[+]${COLOR_RESET} $*"; }
 warn() { echo -e "${COLOR_YELLOW}[-]${COLOR_RESET} $*"; }
 err()  { echo -e "${COLOR_RED}[!] $*${COLOR_RESET}" >&2; }
 
-# Ensure the script is run as root
 require_root() {
   if [[ "$EUID" -ne 0 ]]; then
-    err "This toolkit must be run as root."
-    echo "Use this universal launcher instead:"
-    echo "  curl -fsSL ${REPO_BASE}/wp-toolkit.sh \\"
-    echo "    | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )"
+    err "This script must be run as root (sudo)."
     exit 1
   fi
 }
 
 check_core_tools() {
   if ! command -v curl >/dev/null 2>&1; then
-    err "curl is required. Install it with: apt-get install -y curl"
+    err "curl is required. Please install it: apt-get install -y curl"
     exit 1
   fi
 }
 
-# Functions for each action:
 run_cleanup_script() {
   log "Launching DB cleanup tool (cleanup-script.sh)..."
   bash <(curl -fsSL "${REPO_BASE}/cleanup-script.sh")
@@ -65,6 +59,7 @@ run_malware_scan() {
 
 backup_wp_local_migration() {
   log "Running local migration-style backup for selected WordPress sites..."
+  # --backup-only = Old server backup mode (with site selection)
   bash <(curl -fsSL "${REPO_BASE}/wp-migrate-local.sh") --backup-only
 }
 
