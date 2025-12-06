@@ -5,12 +5,12 @@
 # Local-only WordPress migration wizard:
 #
 # 1) Old Server:
-#    - Create local backups in /root/wp-migrate/<domain>/
-#    - DB + files, no Dropbox involved
-#    - Optional rsync push of /root/wp-migrate to a remote NEW server
+#    - Create local backups in /root/wp-migrate/<domain>/.
+#    - DB + files, no Dropbox involved.
+#    - Optional rsync push of /root/wp-migrate to a remote NEW server.
 #
 # 2) New Server:
-#    - Restore from local backups in /root/wp-migrate/<domain>/
+#    - Restore from local backups in /root/wp-migrate/<domain>/.
 #
 # --backup-only:
 #    - Old server backup mode: let user select site(s), create local backups,
@@ -24,13 +24,6 @@ MIGRATE_ROOT="/root/wp-migrate"
 log()  { echo "[+] $*"; }
 warn() { echo "[-] $*"; }
 err()  { echo "[!] $*" >&2; }
-
-require_root() {
-  if [[ "$EUID" -ne 0 ]]; then
-    err "Must be run as root."
-    exit 1
-  fi
-}
 
 check_tools() {
   local missing=0
@@ -318,7 +311,6 @@ do_new_server_restore() {
 }
 
 main() {
-  require_root
   check_tools
 
   case "${1-}" in
