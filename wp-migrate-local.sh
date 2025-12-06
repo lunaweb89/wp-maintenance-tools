@@ -117,7 +117,7 @@ do_old_server_backup() {
     log "  DB: $db"
     log "  Path: $wp"
 
-    # DB backup using WP-CLI with --allow-root
+    # DB backup using WP-CLI with --allow-root flag
     if ! wp db export "$DB_FILE" --path="$wp" --allow-root; then
       err "DB backup failed for $domain"
       continue
