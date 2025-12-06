@@ -18,13 +18,6 @@ log()  { echo "[+] $*"; }
 warn() { echo "[-] $*"; }
 err()  { echo "[!] $*" >&2; }
 
-require_root() {
-  if [[ "$EUID" -ne 0 ]]; then
-    err "Must be run as root."
-    exit 1
-  fi
-}
-
 check_tools() {
   local missing=0
   for c in rclone mysql rsync tar zcat stat; do
@@ -45,7 +38,6 @@ check_tools() {
 }
 
 main() {
-  require_root
   check_tools
 
   log "Listing sites under ${DROPBOX_REMOTE}..."
