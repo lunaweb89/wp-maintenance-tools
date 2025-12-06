@@ -14,7 +14,7 @@
 #
 # --backup-only:
 #    - Old server backup mode: let user select site(s), create local backups,
-#      then offer rsync push to new server.
+#      then offer rsync push to new server (ask only for NEW server IP).
 #
 
 set -euo pipefail
@@ -168,23 +168,24 @@ do_old_server_backup() {
   echo "Next step (for migration):"
   echo "  - Copy ${MIGRATE_ROOT} to the new server (e.g. rsync or scp)"
 
-  # NEW: offer to push /root/wp-migrate to a remote server via rsync
+  # NEW: offer to push /root/wp-migrate to a remote server via rsync (IP-only)
   echo
   read -rp "Do you want to PUSH ${MIGRATE_ROOT} to a remote NEW server now via rsync? (y/N): " push
   if [[ "$push" =~ ^[Yy]$ ]]; then
-    local REMOTE_DEST REMOTE_DIR
+    local NEW_IP
     echo
-    read -rp "Remote SSH destination (e.g. root@203.0.113.10): " REMOTE_DEST
-    if [[ -z "$REMOTE_DEST" ]]; then
-      warn "No remote destination entered. Skipping rsync push."
+    read -rp "Enter NEW server IP (e.g. 65.109.33.94): " NEW_IP
+    if [[ -z "$NEW_IP" ]]; then
+      warn "No IP entered. Skipping rsync push."
       return
     fi
-    read -rp "Remote directory [/root/wp-migrate]: " REMOTE_DIR
-    REMOTE_DIR="${REMOTE_DIR:-/root/wp-migrate}"
+
+    local REMOTE_DEST="root@${NEW_IP}"
+    local REMOTE_DIR="/root/wp-migrate"
 
     echo
     log "Pushing ${MIGRATE_ROOT}/  →  ${REMOTE_DEST}:${REMOTE_DIR}/"
-    log "If this hangs, check firewall/SSH on the remote server."
+    log "You will be prompted for the SSH password for root@${NEW_IP} (unless keys are set)."
 
     if ! rsync -avz "${MIGRATE_ROOT}/" "${REMOTE_DEST}:${REMOTE_DIR}/"; then
       err "rsync push failed. Please check SSH connectivity and rerun the push manually."
