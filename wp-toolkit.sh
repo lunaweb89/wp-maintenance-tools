@@ -16,7 +16,7 @@
 #   [10] Exit
 #
 # Run directly from GitHub (as root):
-#   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-tools.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh)
 #
 
 set -euo pipefail
