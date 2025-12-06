@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wp-tools.sh
+# wp-toolkit.sh
 #
 # Master menu for WordPress maintenance tools:
 #
