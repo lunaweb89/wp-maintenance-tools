@@ -139,26 +139,27 @@ do_old_server_backup() {
   log "Next step (for migration):"
   log "  - Copy $MIGRATE_ROOT to the new server (e.g. rsync or scp)"
 
-  # Optionally push to remote server via rsync
-  read -rp "Do you want to PUSH $MIGRATE_ROOT to a remote NEW server now via rsync? (y/N): " push
-  if [[ "$push" =~ ^[Yy]$ ]]; then
-    read -rp "Enter NEW server IP (e.g. 65.109.33.94): " NEW_IP
-    read -rp "Enter SSH port for new server (default 22): " SSH_PORT
-    SSH_PORT="${SSH_PORT:-22}"
+ # Optionally push to remote server via rsync
+read -rp "Do you want to PUSH $MIGRATE_ROOT to a remote NEW server now via rsync? (y/N): " push
+if [[ "$push" =~ ^[Yy]$ ]]; then
+  read -rp "Enter NEW server IP (e.g. 65.109.33.94): " NEW_IP
+  read -rp "Enter SSH port for new server (default 22): " SSH_PORT
+  SSH_PORT="${SSH_PORT:-22}"
 
-    # Optional prompt for SSH password (if SSH keys are not configured)
-    read -sp "Enter SSH password for root@$NEW_IP: " SSH_PASSWORD
-    echo
+  # Optional prompt for SSH password (if SSH keys are not configured)
+  read -sp "Enter SSH password for root@$NEW_IP: " SSH_PASSWORD
+  echo
 
-    log "Pushing $MIGRATE_ROOT → root@$NEW_IP:/root/wp-migrate/"
+  log "Pushing $MIGRATE_ROOT → root@$NEW_IP:/root/wp-migrate/"
 
-    # Use sshpass to handle password if SSH keys are not set
-    if command -v sshpass &>/dev/null; then
-      sshpass -p "$SSH_PASSWORD" rsync -avz -e "ssh -p $SSH_PORT" "$MIGRATE_ROOT" root@$NEW_IP:/root/wp-migrate/
-    else
-      rsync -avz -e "ssh -p $SSH_PORT" "$MIGRATE_ROOT" root@$NEW_IP:/root/wp-migrate/
-    fi
+  # Modify this line to use StrictHostKeyChecking=ask to prompt for host key
+  # Use sshpass to handle password if SSH keys are not set
+  if command -v sshpass &>/dev/null; then
+    sshpass -p "$SSH_PASSWORD" rsync -avz -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=ask" "$MIGRATE_ROOT" root@$NEW_IP:/root/wp-migrate/
+  else
+    rsync -avz -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=ask" "$MIGRATE_ROOT" root@$NEW_IP:/root/wp-migrate/
   fi
+fi
 }
 
 # Main entry point
