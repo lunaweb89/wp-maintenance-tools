@@ -18,6 +18,7 @@
 #
 
 set -euo pipefail
+set -x  # Enable debugging
 
 MIGRATE_ROOT="/root/wp-migrate"
 
