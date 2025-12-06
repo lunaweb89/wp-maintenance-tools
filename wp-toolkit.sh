@@ -48,8 +48,8 @@ check_core_tools() {
 }
 
 run_cleanup_script() {
-  log "Launching DB cleanup tool (cleanup-script.sh)..."
-  bash <(curl -fsSL "${REPO_BASE}/cleanup-script.sh")
+  log "Launching DB cleanup tool (wp-cleanup-script.sh)..."
+  bash <(curl -fsSL "${REPO_BASE}/wp-cleanup-script.sh")
 }
 
 run_malware_scan() {
