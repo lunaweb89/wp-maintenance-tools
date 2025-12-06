@@ -52,19 +52,24 @@ do_old_server_backup() {
     return
   fi
 
-  echo
-  log "Detected WordPress installations:"
-  local i=1
-  for wp in "${WP_PATHS[@]}"; do
-    local db domain
-    db=$(grep -E "define\\(\\s*'DB_NAME'" "$wp/wp-config.php" 2>/dev/null | awk -F"'" '{print $4}')
-    domain="$(basename "$(dirname "$wp")")"
-    echo "  [$i] $domain (DB: ${db:-UNKNOWN}, Path: $wp)"
-    ((i++))
-  done
+echo
+log "Detected WordPress installations and their sizes:"
+local i=1
+for wp in "${WP_PATHS[@]}"; do
+  local db domain size
+  db=$(grep -E "define\\(\\s*'DB_NAME'" "$wp/wp-config.php" 2>/dev/null | awk -F"'" '{print $4}')
+  domain="$(basename "$(dirname "$wp")")"
 
-  echo
-  read -rp "Backup which sites? (e.g. 1 2 5, or A for all): " selection
+  # Get the size of the WordPress directory (including wp-content, wp-includes, etc.)
+  size=$(du -sh "$wp" 2>/dev/null | awk '{print $1}')  # Get human-readable size
+
+  # Output the domain, DB name, and size
+  echo "  [$i] $domain (DB: ${db:-UNKNOWN}, Path: $wp, Size: $size)"
+  ((i++))
+done
+
+echo
+read -rp "Backup which sites? (e.g. 1 2 5, or A for all): " selection
 
   declare -a SELECTED_WP_PATHS=()
 
