@@ -7,14 +7,14 @@
 # 1) Old Server:
 #    - Create local backups in /root/wp-migrate/<domain>/
 #    - DB + files, no Dropbox involved
-#    - Optional rsync push of /root/wp-migrate to a remote NEW server
+#    - Optional rsync push of /root/wp-migrate to a remote NEW server (IP-only prompt)
 #
 # 2) New Server:
 #    - Restore from local backups in /root/wp-migrate/<domain>/
 #
 # --backup-only:
 #    - Old server backup mode: let user select site(s), create local backups,
-#      then offer rsync push to new server (ask only for NEW server IP).
+#      then offer rsync push to new server.
 #
 
 set -euo pipefail
@@ -27,17 +27,19 @@ err()  { echo "[!] $*" >&2; }
 
 require_root() {
   if [[ "$EUID" -ne 0 ]]; then
-    err "Must be run as root."
+    err "This script must be run as root."
+    echo "Use the toolkit launcher instead:"
+    echo "  curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh \\"
+    echo "    | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )"
     exit 1
   fi
 }
 
 check_tools() {
   local missing=0
-  # zcat added because we use it in restore
   for c in mysqldump mysql tar gzip rsync stat zcat; do
     if ! command -v "$c" >/dev/null 2>&1; then
-      err "Required command '$c' not found. Install it (apt-get)."
+      err "Required command '$c' not found. Install it with apt-get."
       missing=1
     fi
   done
@@ -65,7 +67,7 @@ do_old_server_backup() {
   local i=1
   for wp in "${WP_PATHS[@]}"; do
     local db domain
-    db=$(grep -E "define\\(\\s*'DB_NAME'" "$wp/wp-config.php" 2>/dev/null | awk -F"'" '{print $4}')
+    db="$(grep -E "define\(\s*'DB_NAME'" "$wp/wp-config.php" 2>/dev/null | awk -F"'" '{print $4}')"
     domain="$(basename "$(dirname "$wp")")"
     echo "  [$i] $domain (DB: ${db:-UNKNOWN}, Path: $wp)"
     ((i++))
@@ -104,7 +106,7 @@ do_old_server_backup() {
     echo "  - $domain ($wp)"
   done
 
-  # Only ask this confirmation if not invoked as --non-interactive
+  # Only ask confirmation if not invoked as --non-interactive
   if [[ "${1-}" != "--non-interactive" ]]; then
     echo
     read -rp "Create LOCAL migration backups for these site(s) under ${MIGRATE_ROOT}? (y/N): " ok
@@ -114,9 +116,11 @@ do_old_server_backup() {
   local TS
   TS="$(date +%Y%m%d-%H%M%S)"
 
+  mkdir -p "$MIGRATE_ROOT"
+
   for wp in "${SELECTED_WP_PATHS[@]}"; do
     local db domain domain_dir
-    db=$(grep -E "define\\(\\s*'DB_NAME'" "$wp/wp-config.php" 2>/dev/null | awk -F"'" '{print $4}')
+    db="$(grep -E "define\(\s*'DB_NAME'" "$wp/wp-config.php" 2>/dev/null | awk -F"'" '{print $4}')"
     domain="$(basename "$(dirname "$wp")")"
     if [[ -z "$db" ]]; then
       warn "Skipping $domain — cannot parse DB_NAME."
@@ -142,7 +146,7 @@ do_old_server_backup() {
         continue
       fi
     else
-      warn "/root/.my.cnf not found. You may be prompted..."
+      warn "/root/.my.cnf not found. You may be prompted for MySQL root password..."
       if ! mysqldump -u root -p "$db" | gzip > "$DB_FILE"; then
         err "DB backup failed for $db"
         rm -f "$DB_FILE"
@@ -168,7 +172,7 @@ do_old_server_backup() {
   echo "Next step (for migration):"
   echo "  - Copy ${MIGRATE_ROOT} to the new server (e.g. rsync or scp)"
 
-  # NEW: offer to push /root/wp-migrate to a remote server via rsync (IP-only)
+  # Offer to push /root/wp-migrate to a remote server via rsync (IP-only)
   echo
   read -rp "Do you want to PUSH ${MIGRATE_ROOT} to a remote NEW server now via rsync? (y/N): " push
   if [[ "$push" =~ ^[Yy]$ ]]; then
@@ -260,9 +264,9 @@ do_new_server_restore() {
   fi
 
   local DB_NAME DB_USER DB_PASS
-  DB_NAME="$(grep -E "define\\(\\s*'DB_NAME'" "$config" | awk -F"'" '{print $4}')"
-  DB_USER="$(grep -E "define\\(\\s*'DB_USER'" "$config" | awk -F"'" '{print $4}')"
-  DB_PASS="$(grep -E "define\\(\\s*'DB_PASSWORD'" "$config" | awk -F"'" '{print $4}')"
+  DB_NAME="$(grep -E "define\(\s*'DB_NAME'" "$config" | awk -F"'" '{print $4}')"
+  DB_USER="$(grep -E "define\(\s*'DB_USER'" "$config" | awk -F"'" '{print $4}')"
+  DB_PASS="$(grep -E "define\(\s*'DB_PASSWORD'" "$config" | awk -F"'" '{print $4}')"
 
   if [[ -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASS" ]]; then
     err "Failed to parse DB credentials from wp-config.php."
@@ -302,7 +306,7 @@ do_new_server_restore() {
 
   local owner group
   owner="$(stat -c '%U' "$TARGET_ROOT" 2>/dev/null || echo root)"
-  group="$(stat -c '%G' "$TARGET_ROOT" 2>/dev/null || echo root)"
+  group="$(stat -c '%G' "$TARGET_ROOT" 2>/devnull || echo root)"
   log "Applying ownership ${owner}:${group} ..."
   chown -R "${owner}:${group}" "$TARGET_ROOT" 2>/dev/null || true
 
@@ -323,7 +327,6 @@ main() {
 
   case "${1-}" in
     --backup-only)
-      # Old server backup mode for selected sites, plus optional rsync push
       do_old_server_backup --non-interactive
       ;;
     "" )
