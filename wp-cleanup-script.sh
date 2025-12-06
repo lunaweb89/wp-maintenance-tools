@@ -14,7 +14,7 @@
 # - If ANY cleanup step fails, backup is kept; only deleted on clean success
 #
 # Run (as root) directly from GitHub:
-#   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/cleanup-script.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-cleanup-script.sh)
 #
 
 set -uo pipefail
