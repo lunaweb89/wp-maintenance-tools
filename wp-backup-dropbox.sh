@@ -2,22 +2,20 @@
 #
 # wp-backup-dropbox.sh
 #
-# - Backup WordPress sites (DB + files) to Dropbox only (no local retention)
-# - Per-domain structure:
-#     dropbox:wp-backups/<domain>/
-# - Retention on Dropbox:
-#     - Daily: 7
-#     - Weekly: 4
-#     - Monthly: 2
-# - Modes:
-#     - (default) manual: interactive, lets you select sites (e.g. 1 2 5, or A for all)
-#     - --auto-daily: non-interactive, backs up ALL sites (for cron)
-#     - --auto-setup: run one auto-daily + install cron at 03:30
+# Backup WordPress sites (DB + files) directly to Dropbox via rclone.
+#
+# Modes:
+#   No args      → Interactive per-site backup (manual)
+#   --auto-setup → Run a full backup of ALL WP sites now, then install a daily cron
+#
+# Dropbox layout:
+#   dropbox:wp-backups/<domain>/<domain>-db-YYYYMMDD-HHMMSS.sql.gz
+#   dropbox:wp-backups/<domain>/<domain>-files-YYYYMMDD-HHMMSS.tar.gz
+#
+# No long-term local backups are kept; only temp files.
 #
 
 set -euo pipefail
-
-DROPBOX_REMOTE="dropbox:wp-backups"
 
 log()  { echo "[+] $*"; }
 warn() { echo "[-] $*"; }
@@ -25,7 +23,10 @@ err()  { echo "[!] $*" >&2; }
 
 require_root() {
   if [[ "$EUID" -ne 0 ]]; then
-    err "Must be run as root."
+    err "This script must be run as root."
+    echo "Use the toolkit launcher instead:"
+    echo "  curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh \\"
+    echo "    | ( command -v sudo >/dev/null 2>&1 && sudo bash || bash )"
     exit 1
   fi
 }
@@ -34,7 +35,7 @@ check_tools() {
   local missing=0
   for c in mysqldump tar gzip rclone find; do
     if ! command -v "$c" >/dev/null 2>&1; then
-      err "Required command '$c' not found. Please install it (apt-get)."
+      err "Required command '$c' not found. Install with apt-get."
       missing=1
     fi
   done
@@ -42,9 +43,10 @@ check_tools() {
     exit 1
   fi
 
-  if ! rclone listremotes 2>/dev/null | grep -q "^dropbox:"; then
+  # Check rclone remote "dropbox"
+  if ! rclone listremotes 2>/dev/null | grep -q '^dropbox:'; then
     err "rclone remote 'dropbox' not configured."
-    echo "Run: rclone config   and create a remote named 'dropbox' pointing to Dropbox."
+    echo "Configure it first with: rclone config"
     exit 1
   fi
 }
@@ -56,256 +58,205 @@ discover_wp_paths() {
   )
 }
 
-backup_wp_sites_to_dropbox() {
-  local MODE="${1:-manual}"
-
+select_sites_manual() {
   discover_wp_paths
   if [[ ${#WP_PATHS[@]} -eq 0 ]]; then
     warn "No WordPress installations found under /home."
-    return
+    exit 0
   fi
 
   echo
   log "Detected WordPress installations:"
   local i=1
   for wp in "${WP_PATHS[@]}"; do
-    local db domain
-    db=$(grep -E "define\\(\\s*'DB_NAME'" "$wp/wp-config.php" 2>/dev/null | awk -F"'" '{print $4}')
-    domain=$(basename "$(dirname "$wp")")
-    echo "  [$i] $domain"
-    echo "      Path: $wp"
-    echo "      DB  : ${db:-UNKNOWN}"
+    local user_dir domain config db_name
+    user_dir="$(dirname "$wp")"
+    domain="$(basename "$user_dir")"
+    config="${wp}/wp-config.php"
+    db_name="$(grep -E "define\(\s*'DB_NAME'" "$config" 2>/dev/null | awk -F"'" '{print $4}')"
+    echo "  [$i] ${domain} (DB: ${db_name:-UNKNOWN}, Path: ${wp})"
     ((i++))
   done
 
-  declare -a SELECTED_WP_PATHS=()
+  echo
+  read -rp "Backup which sites? (e.g. 1 2 5, or A for all): " selection
 
-  if [[ "$MODE" == "manual" ]]; then
-    echo
-    read -rp "Backup which sites? (e.g. 1 2 5, or A for all): " selection
+  SELECTED_WP_PATHS=()
 
-    if [[ "$selection" =~ ^[Aa]$ ]]; then
-      SELECTED_WP_PATHS=("${WP_PATHS[@]}")
-    else
-      for token in $selection; do
-        if ! [[ "$token" =~ ^[0-9]+$ ]]; then
-          warn "Ignoring invalid token '$token' (not a number)."
-          continue
-        fi
-        if (( token < 1 || token > ${#WP_PATHS[@]} )); then
-          warn "Ignoring out-of-range index '$token'."
-          continue
-        fi
-        SELECTED_WP_PATHS+=("${WP_PATHS[token-1]}")
-      done
-      if [[ ${#SELECTED_WP_PATHS[@]} -eq 0 ]]; then
-        err "No valid sites selected; nothing to back up."
-        return
-      fi
-    fi
-
-    echo
-    log "You selected ${#SELECTED_WP_PATHS[@]} site(s) to back up:"
-    for wp in "${SELECTED_WP_PATHS[@]}"; do
-      local domain
-      domain="$(basename "$(dirname "$wp")")"
-      echo "  - $domain ($wp)"
-    done
-
-    echo
-    read -rp "Backup these site(s) to Dropbox (DB + files, no local retention)? (y/N): " ok
-    [[ "$ok" =~ ^[Yy]$ ]] || { warn "Cancelled."; return; }
-  else
-    # AUTO (daily) mode: always back up ALL sites, no prompts
+  if [[ "$selection" =~ ^[Aa]$ ]]; then
     SELECTED_WP_PATHS=("${WP_PATHS[@]}")
-    log "AUTO mode: backing up ALL detected WordPress sites to Dropbox."
+  else
+    for token in $selection; do
+      if ! [[ "$token" =~ ^[0-9]+$ ]]; then
+        warn "Ignoring invalid token '$token' (not a number)."
+        continue
+      fi
+      if (( token < 1 || token > ${#WP_PATHS[@]} )); then
+        warn "Ignoring out-of-range index '$token'."
+        continue
+      fi
+      SELECTED_WP_PATHS+=("${WP_PATHS[token-1]}")
+    done
+    if [[ ${#SELECTED_WP_PATHS[@]} -eq 0 ]]; then
+      err "No valid sites selected; nothing to back up."
+      exit 1
+    fi
   fi
 
-  local TS DOW DOM
-  TS="$(date +%Y%m%d-%H%M%S)"
-  DOW="$(date +%u)"   # 1-7 (Mon-Sun)
-  DOM="$(date +%d)"   # 01-31
-
+  echo
+  log "You selected ${#SELECTED_WP_PATHS[@]} site(s) to back up to Dropbox:"
   for wp in "${SELECTED_WP_PATHS[@]}"; do
-    local db domain
-    db=$(grep -E "define\\(\\s*'DB_NAME'" "$wp/wp-config.php" 2>/dev/null | awk -F"'" '{print $4}')
-    domain=$(basename "$(dirname "$wp")")
-
-    if [[ -z "$db" ]]; then
-      warn "Skipping $domain — could not parse DB_NAME from wp-config.php"
-      continue
-    fi
-
-    local TMP_DIR
-    TMP_DIR="$(mktemp -d "/tmp/wp-backup-${domain}-XXXXXX")"
-
-    local label suffix
-    if [[ "$MODE" == "daily" ]]; then
-      label="daily"
-    else
-      label="manual"
-    fi
-    suffix="${TS}-${label}"
-
-    local DB_FILE="${TMP_DIR}/${domain}-db-${suffix}.sql.gz"
-    local FILES_FILE="${TMP_DIR}/${domain}-files-${suffix}.tar.gz"
-
-    echo
-    log "Backing up site: $domain"
-    log "  DB   : $db"
-    log "  Root : $wp"
-
-    # DB backup
-    log "  → Dumping database..."
-    if [[ -f /root/.my.cnf ]]; then
-      if mysqldump "$db" | gzip > "$DB_FILE"; then
-        log "    DB backup created: $DB_FILE"
-      else
-        err "    DB backup failed for $db"
-        rm -rf "$TMP_DIR"
-        continue
-      fi
-    else
-      warn "    /root/.my.cnf not found. You may be prompted..."
-      if mysqldump -u root -p "$db" | gzip > "$DB_FILE"; then
-        log "    DB backup created: $DB_FILE"
-      else
-        err "    DB backup failed for $db"
-        rm -rf "$TMP_DIR"
-        continue
-      fi
-    fi
-
-    # Files backup
-    log "  → Archiving WordPress files..."
-    local parent base
-    parent="$(dirname "$wp")"
-    base="$(basename "$wp")"
-    if tar -czf "$FILES_FILE" -C "$parent" "$base"; then
-      log "    Files backup created: $FILES_FILE"
-    else
-      err "    Files backup failed for $domain"
-      rm -rf "$TMP_DIR"
-      continue
-    fi
-
-    # Upload to Dropbox
-    local REMOTE_DIR="${DROPBOX_REMOTE}/${domain}"
-    log "  → Uploading to Dropbox: ${REMOTE_DIR}"
-    if rclone copy "$TMP_DIR" "$REMOTE_DIR" >/dev/null 2>&1; then
-      log "    Upload completed."
-    else
-      warn "    Upload encountered issues. Check rclone / network."
-    fi
-
-    # AUTO retention only in daily mode
-    if [[ "$MODE" == "daily" ]]; then
-      local daily_db daily_files weekly_db weekly_files monthly_db monthly_files i
-
-      # Daily: keep 7
-      mapfile -t daily_db < <(rclone lsf --files-only --format "p" "$REMOTE_DIR" 2>/dev/null \
-        | grep "${domain}-db-.*-daily\.sql\.gz" | sort -r || true)
-      mapfile -t daily_files < <(rclone lsf --files-only --format "p" "$REMOTE_DIR" 2>/dev/null \
-        | grep "${domain}-files-.*-daily\.tar\.gz" | sort -r || true)
-
-      if ((${#daily_db[@]} > 7)); then
-        for ((i=7; i<${#daily_db[@]}; i++)); do
-          rclone delete "${REMOTE_DIR}/${daily_db[$i]}" >/dev/null 2>&1 || true
-        done
-      fi
-      if ((${#daily_files[@]} > 7)); then
-        for ((i=7; i<${#daily_files[@]}; i++)); do
-          rclone delete "${REMOTE_DIR}/${daily_files[$i]}" >/dev/null 2>&1 || true
-        done
-      fi
-
-      # Weekly: promote on Sunday, keep 4
-      if [[ "$DOW" == "7" ]]; then
-        local DAILY_DB_REMOTE DAILY_FILES_REMOTE
-        DAILY_DB_REMOTE="${domain}-db-${TS}-daily.sql.gz"
-        DAILY_FILES_REMOTE="${domain}-files-${TS}-daily.tar.gz"
-
-        rclone copyto "${REMOTE_DIR}/${DAILY_DB_REMOTE}" "${REMOTE_DIR}/${domain}-db-${TS}-weekly.sql.gz" >/dev/null 2>&1 || true
-        rclone copyto "${REMOTE_DIR}/${DAILY_FILES_REMOTE}" "${REMOTE_DIR}/${domain}-files-${TS}-weekly.tar.gz" >/dev/null 2>&1 || true
-
-        mapfile -t weekly_db < <(rclone lsf --files-only --format "p" "$REMOTE_DIR" 2>/dev/null \
-          | grep "${domain}-db-.*-weekly\.sql\.gz" | sort -r || true)
-        mapfile -t weekly_files < <(rclone lsf --files-only --format "p" "$REMOTE_DIR" 2>/dev/null \
-          | grep "${domain}-files-.*-weekly\.tar\.gz" | sort -r || true)
-
-        if ((${#weekly_db[@]} > 4)); then
-          for ((i=4; i<${#weekly_db[@]}; i++)); do
-            rclone delete "${REMOTE_DIR}/${weekly_db[$i]}" >/dev/null 2>&1 || true
-          done
-        fi
-        if ((${#weekly_files[@]} > 4)); then
-          for ((i=4; i<${#weekly_files[@]}; i++)); do
-            rclone delete "${REMOTE_DIR}/${weekly_files[$i]}" >/dev/null 2>&1 || true
-          done
-        fi
-      fi
-
-      # Monthly: promote on day 01, keep 2 months
-      if [[ "$DOM" == "01" ]]; then
-        local month_tag
-        month_tag="$(date +%Y-%m)"
-        local MONTHLY_DB_REMOTE="${domain}-db-${month_tag}-monthly.sql.gz"
-        local MONTHLY_FILES_REMOTE="${domain}-files-${month_tag}-monthly.tar.gz"
-        local DAILY_DB_REMOTE="${domain}-db-${TS}-daily.sql.gz"
-        local DAILY_FILES_REMOTE="${domain}-files-${TS}-daily.tar.gz"
-
-        rclone copyto "${REMOTE_DIR}/${DAILY_DB_REMOTE}" "${REMOTE_DIR}/${MONTHLY_DB_REMOTE}" >/dev/null 2>&1 || true
-        rclone copyto "${REMOTE_DIR}/${DAILY_FILES_REMOTE}" "${REMOTE_DIR}/${MONTHLY_FILES_REMOTE}" >/dev/null 2>&1 || true
-
-        mapfile -t monthly_db < <(rclone lsf --files-only --format "p" "$REMOTE_DIR" 2>/dev/null \
-          | grep "${domain}-db-.*-monthly\.sql\.gz" | sort -r || true)
-        mapfile -t monthly_files < <(rclone lsf --files-only --format "p" "$REMOTE_DIR" 2>/dev/null \
-          | grep "${domain}-files-.*-monthly\.tar\.gz" | sort -r || true)
-
-        if ((${#monthly_db[@]} > 2)); then
-          for ((i=2; i<${#monthly_db[@]}; i++)); do
-            rclone delete "${REMOTE_DIR}/${monthly_db[$i]}" >/dev/null 2>&1 || true
-          done
-        fi
-        if ((${#monthly_files[@]} > 2)); then
-          for ((i=2; i<${#monthly_files[@]}; i++)); do
-            rclone delete "${REMOTE_DIR}/${monthly_files[$i]}" >/dev/null 2>&1 || true
-          done
-        fi
-      fi
-    fi
-
-    rm -rf "$TMP_DIR"
+    local domain
+    domain="$(basename "$(dirname "$wp")")"
+    echo "  - $domain ($wp)"
   done
 
   echo
-  log "Backups completed. All retained copies are in Dropbox only."
+  read -rp "Proceed with Dropbox backup for these site(s)? (y/N): " ok
+  [[ "$ok" =~ ^[Yy]$ ]] || { warn "Cancelled."; exit 0; }
+}
+
+backup_one_site_to_dropbox() {
+  local wp_path="$1"
+  local label="${2:-manual}"
+
+  local user_dir domain
+  user_dir="$(dirname "$wp_path")"
+  domain="$(basename "$user_dir")"
+
+  local config db_name
+  config="${wp_path}/wp-config.php"
+  db_name="$(grep -E "define\(\s*'DB_NAME'" "$config" 2>/dev/null | awk -F"'" '{print $4}')"
+
+  if [[ -z "$db_name" ]]; then
+    warn "Skipping ${domain} — cannot parse DB_NAME from ${config}."
+    return
+  fi
+
+  local TMP_DIR
+  TMP_DIR="$(mktemp -d "/tmp/wp-backup-dropbox-${domain}-XXXXXX")"
+
+  local TS
+  TS="$(date +%Y%m%d-%H%M%S)"
+
+  local DB_FILE="${TMP_DIR}/${domain}-db-${TS}-${label}.sql.gz"
+  local FILES_FILE="${TMP_DIR}/${domain}-files-${TS}-${label}.tar.gz"
+  local REMOTE_DIR="dropbox:wp-backups/${domain}"
+
+  echo
+  log "Backing up ${domain} to Dropbox..."
+  log "  Local tmp dir: ${TMP_DIR}"
+  log "  Remote dir   : ${REMOTE_DIR}"
+
+  # DB dump
+  if [[ -f /root/.my.cnf ]]; then
+    if ! mysqldump "$db_name" | gzip > "$DB_FILE"; then
+      err "DB backup failed for ${db_name}"
+      rm -rf "$TMP_DIR"
+      return
+    fi
+  else
+    warn "/root/.my.cnf not found. You may be prompted for MySQL root password..."
+    if ! mysqldump -u root -p "$db_name" | gzip > "$DB_FILE"; then
+      err "DB backup failed for ${db_name}"
+      rm -rf "$TMP_DIR"
+      return
+    fi
+  fi
+
+  # Files tar
+  local parent base
+  parent="$(dirname "$wp_path")"
+  base="$(basename "$wp_path")"
+  if ! tar -czf "$FILES_FILE" -C "$parent" "$base"; then
+    err "Files backup failed for ${domain}"
+    rm -rf "$TMP_DIR"
+    return
+  fi
+
+  # Upload to Dropbox
+  if ! rclone copy "$TMP_DIR" "$REMOTE_DIR" >/dev/null 2>&1; then
+    err "rclone upload failed for ${domain}"
+    rm -rf "$TMP_DIR"
+    return
+  fi
+
+  # Retention: keep last 7 backups per domain (per DB and files separately)
+  log "Applying simple retention (last 7 backups) for ${domain}..."
+
+  # List and trim DB backups
+  mapfile -t REMOTE_DB_FILES < <(rclone lsjson "${REMOTE_DIR}" 2>/dev/null | jq -r '.[] | select(.Name | test("-db-")) | .Name' | sort)
+  local count="${#REMOTE_DB_FILES[@]}"
+  if (( count > 7 )); then
+    local to_delete=$((count - 7))
+    for ((i=0; i<to_delete; i++)); do
+      rclone delete "${REMOTE_DIR}/${REMOTE_DB_FILES[i]}" || true
+    done
+  fi
+
+  # List and trim FILE backups
+  mapfile -t REMOTE_FILE_FILES < <(rclone lsjson "${REMOTE_DIR}" 2>/dev/null | jq -r '.[] | select(.Name | test("-files-")) | .Name' | sort)
+  count="${#REMOTE_FILE_FILES[@]}"
+  if (( count > 7 )); then
+    local to_delete2=$((count - 7))
+    for ((i=0; i<to_delete2; i++)); do
+      rclone delete "${REMOTE_DIR}/${REMOTE_FILE_FILES[i]}" || true
+    done
+  fi
+
+  rm -rf "$TMP_DIR"
+  log "Backup for ${domain} completed and uploaded to Dropbox."
+}
+
+run_manual_mode() {
+  select_sites_manual
+
+  for wp in "${SELECTED_WP_PATHS[@]}"; do
+    backup_one_site_to_dropbox "$wp" "manual"
+  done
+
+  echo
+  log "Manual Dropbox backup completed."
+}
+
+backup_all_sites_auto() {
+  discover_wp_paths
+  if [[ ${#WP_PATHS[@]} -eq 0 ]]; then
+    warn "No WordPress installations found under /home."
+    return
+  fi
+
+  log "Auto-backup: backing up ALL WordPress sites to Dropbox..."
+  for wp in "${WP_PATHS[@]}"; do
+    backup_one_site_to_dropbox "$wp" "daily"
+  done
 }
 
 setup_cron() {
   local CRON_SCRIPT="/usr/local/bin/wp-auto-backup-dropbox.sh"
   local CRON_FILE="/etc/cron.d/wp-auto-backup-dropbox"
-  local REPO_BASE="https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main"
 
-  log "Creating helper cron script: $CRON_SCRIPT"
-
-  cat > "$CRON_SCRIPT" <<EOF
+  cat > "$CRON_SCRIPT" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-bash <(curl -fsSL "${REPO_BASE}/wp-backup-dropbox.sh") --auto-daily
+
+REPO_BASE="https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main"
+
+# Run auto backup (all sites → Dropbox, label=daily)
+curl -fsSL "${REPO_BASE}/wp-backup-dropbox.sh" | bash -s -- --auto-run
 EOF
 
   chmod +x "$CRON_SCRIPT"
 
-  log "Creating daily cron job at 03:30 in: $CRON_FILE"
+  # Daily at 03:30, log to /var/log/wp-auto-backup-dropbox.log
   cat > "$CRON_FILE" <<EOF
 SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-30 3 * * * root $CRON_SCRIPT >/var/log/wp-auto-backup-dropbox.log 2>&1
+30 3 * * * root ${CRON_SCRIPT} >> /var/log/wp-auto-backup-dropbox.log 2>&1
 EOF
 
-  log "Cron installed. Daily backups to Dropbox (03:30) enabled."
+  log "Cron installed: daily Dropbox backup at 03:30"
 }
 
 main() {
@@ -313,20 +264,23 @@ main() {
   check_tools
 
   case "${1-}" in
-    --auto-daily)
-      backup_wp_sites_to_dropbox "daily"
-      ;;
     --auto-setup)
-      echo "This will:"
-      echo "  - Run one AUTO DAILY backup now (ALL sites)"
-      echo "  - Install a daily cron job at 03:30"
-      read -rp "Proceed? (y/N): " ok
+      echo
+      log "Auto-setup: this will run an immediate full backup of ALL WP sites to Dropbox,"
+      log "then install a daily cron job at 03:30."
+      echo
+      read -rp "Proceed with AUTO setup? (y/N): " ok
       [[ "$ok" =~ ^[Yy]$ ]] || { warn "Cancelled."; exit 0; }
-      backup_wp_sites_to_dropbox "daily"
+
+      backup_all_sites_auto
       setup_cron
       ;;
+    --auto-run)
+      # Called from cron helper script: run all-site backup only, no prompts
+      backup_all_sites_auto
+      ;;
     *)
-      backup_wp_sites_to_dropbox "manual"
+      run_manual_mode
       ;;
   esac
 }
