@@ -1,4 +1,3 @@
-```markdown
 # WordPress Maintenance Toolkit
 
 A complete shell-based toolkit to manage, secure, back up, restore, and migrate multiple WordPress sites on any Linux server (CyberPanel-style `/home/<domain>/public_html` layout).
