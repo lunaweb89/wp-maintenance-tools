@@ -196,19 +196,24 @@ main() {
   log "Keeping last ${YEARS} year(s) of orders; anything older will be eligible for deletion."
   echo
 
-  # Backup DB via WP-CLI
-  BACKUP_DIR="/root/wp-db-backups"
+  # Backup DB via WP-CLI (must be writable by WP_USER)
+  BACKUP_DIR="/home/${WP_USER}/wp-db-backups"
   mkdir -p "$BACKUP_DIR"
+  chown "${WP_USER}:${WP_USER}" "$BACKUP_DIR"
+
   TS="$(date +%Y%m%d-%H%M%S)"
   BACKUP_FILE="${BACKUP_DIR}/${DOMAIN}-db-backup-before-cleanup-${TS}.sql"
 
   log "Creating database backup with WP-CLI (wp db export)..."
-  if wp_site db export "$BACKUP_FILE"; then
-    log "Backup created: ${BACKUP_FILE}"
+  log "Backup directory: ${BACKUP_DIR}"
+
+  if sudo -u "$WP_USER" -i -- wp db export "$BACKUP_FILE" --path="$WP_PATH"; then
+  log "Backup created: ${BACKUP_FILE}"
   else
     err "Backup failed; aborting cleanup. No data has been deleted."
     exit 1
   fi
+
 
   # Show current DB size
   echo
