@@ -147,12 +147,13 @@ wp_site() {
   sudo -u "$WP_USER" -i -- wp "$@" --path="$WP_PATH"
 }
 
-# DB query wrapper
+# DB query wrapper (fatal on error)
 wp_db_query() {
   local sql="$1"
   wp_site db query "$sql"
 }
 
+# DB query wrapper (non-fatal, sets ERRORS=1)
 wp_db_query_nonfatal() {
   local sql="$1"
   if ! wp_db_query "$sql"; then
@@ -164,7 +165,7 @@ wp_db_query_nonfatal() {
 table_exists() {
   local tbl="$1"
   local out
-  out="$(wp_db_query "SHOW TABLES LIKE '${tbl}';" --skip-column-names 2>/dev/null || true)"
+  out="$(wp_site db query "SHOW TABLES LIKE '${tbl}';" --skip-column-names 2>/dev/null || true)"
   [[ "$out" == "$tbl" ]]
 }
 
@@ -208,12 +209,11 @@ main() {
   log "Backup directory: ${BACKUP_DIR}"
 
   if sudo -u "$WP_USER" -i -- wp db export "$BACKUP_FILE" --path="$WP_PATH"; then
-  log "Backup created: ${BACKUP_FILE}"
+    log "Backup created: ${BACKUP_FILE}"
   else
     err "Backup failed; aborting cleanup. No data has been deleted."
     exit 1
   fi
-
 
   # Show current DB size
   echo
@@ -241,13 +241,57 @@ main() {
 
   echo
   log "Counts BEFORE deletion (older than ${YEARS} year(s)):"
-  wp_db_query "SELECT COUNT(*) AS old_orders FROM ${DB_PREFIX}posts WHERE post_type='shop_order' AND post_date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);"
-  wp_db_query "SELECT COUNT(*) AS old_order_items FROM ${DB_PREFIX}woocommerce_order_items oi JOIN ${DB_PREFIX}posts p ON oi.order_id = p.ID WHERE p.post_type='shop_order' AND p.post_date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);"
-  wp_db_query "SELECT COUNT(*) AS old_order_itemmeta FROM ${DB_PREFIX}woocommerce_order_itemmeta oim JOIN ${DB_PREFIX}woocommerce_order_items oi ON oi.order_item_id = oim.order_item_id JOIN ${DB_PREFIX}posts p ON oi.order_id = p.ID WHERE p.post_type='shop_order' AND p.post_date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);"
-  wp_db_query "SELECT COUNT(*) AS old_comments FROM ${DB_PREFIX}comments c JOIN ${DB_PREFIX}posts p ON p.ID = c.comment_post_ID WHERE p.post_type='shop_order' AND p.post_date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);"
+  # Orders (posts)
+  wp_db_query "
+    SELECT COUNT(*) AS old_orders
+    FROM ${DB_PREFIX}posts
+    WHERE post_type='shop_order'
+      AND post_date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);
+  "
 
+  # Order items (only if table exists)
+  if table_exists "${DB_PREFIX}woocommerce_order_items"; then
+    wp_db_query "
+      SELECT COUNT(*) AS old_order_items
+      FROM ${DB_PREFIX}woocommerce_order_items oi
+      JOIN ${DB_PREFIX}posts p ON oi.order_id = p.ID
+      WHERE p.post_type='shop_order'
+        AND p.post_date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);
+    "
+  else
+    log "Table ${DB_PREFIX}woocommerce_order_items not found; skipping old_order_items count."
+  fi
+
+  # Order itemmeta (only if table exists)
+  if table_exists "${DB_PREFIX}woocommerce_order_itemmeta"; then
+    wp_db_query "
+      SELECT COUNT(*) AS old_order_itemmeta
+      FROM ${DB_PREFIX}woocommerce_order_itemmeta oim
+      JOIN ${DB_PREFIX}woocommerce_order_items oi ON oi.order_item_id = oim.order_item_id
+      JOIN ${DB_PREFIX}posts p ON oi.order_id = p.ID
+      WHERE p.post_type='shop_order'
+        AND p.post_date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);
+    "
+  else
+    log "Table ${DB_PREFIX}woocommerce_order_itemmeta not found; skipping old_order_itemmeta count."
+  fi
+
+  # Comments on orders (order notes)
+  wp_db_query "
+    SELECT COUNT(*) AS old_comments
+    FROM ${DB_PREFIX}comments c
+    JOIN ${DB_PREFIX}posts p ON p.ID = c.comment_post_ID
+    WHERE p.post_type='shop_order'
+      AND p.post_date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);
+  "
+
+  # AutomateWoo logs
   if table_exists "${DB_PREFIX}automatewoo_logs"; then
-    wp_db_query "SELECT COUNT(*) AS aw_logs_old FROM ${DB_PREFIX}automatewoo_logs WHERE date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);"
+    wp_db_query "
+      SELECT COUNT(*) AS aw_logs_old
+      FROM ${DB_PREFIX}automatewoo_logs
+      WHERE date < DATE_SUB(CURDATE(), INTERVAL ${YEARS} YEAR);
+    "
   else
     log "AutomateWoo logs table not found; skipping AutomateWoo-specific cleanup."
   fi
@@ -265,6 +309,7 @@ main() {
   echo
   # ---- Deletions start here ----
 
+  # AutomateWoo logs (if present)
   if table_exists "${DB_PREFIX}automatewoo_logs"; then
     log "Deleting old AutomateWoo log meta..."
     wp_db_query_nonfatal "
@@ -290,20 +335,30 @@ main() {
     JOIN ${HELPER_TABLE} h ON h.order_id = p.ID;
   "
 
-  log "Deleting old WooCommerce order itemmeta..."
-  wp_db_query_nonfatal "
-    DELETE oim
-    FROM ${DB_PREFIX}woocommerce_order_itemmeta oim
-    JOIN ${DB_PREFIX}woocommerce_order_items oi ON oi.order_item_id = oim.order_item_id
-    JOIN ${HELPER_TABLE} h ON h.order_id = oi.order_id;
-  "
+  # WooCommerce order itemmeta (only if table exists)
+  if table_exists "${DB_PREFIX}woocommerce_order_itemmeta"; then
+    log "Deleting old WooCommerce order itemmeta..."
+    wp_db_query_nonfatal "
+      DELETE oim
+      FROM ${DB_PREFIX}woocommerce_order_itemmeta oim
+      JOIN ${DB_PREFIX}woocommerce_order_items oi ON oi.order_item_id = oim.order_item_id
+      JOIN ${HELPER_TABLE} h ON h.order_id = oi.order_id;
+    "
+  else
+    log "Table ${DB_PREFIX}woocommerce_order_itemmeta not found; skipping order itemmeta deletion."
+  fi
 
-  log "Deleting old WooCommerce order items..."
-  wp_db_query_nonfatal "
-    DELETE oi
-    FROM ${DB_PREFIX}woocommerce_order_items oi
-    JOIN ${HELPER_TABLE} h ON h.order_id = oi.order_id;
-  "
+  # WooCommerce order items (only if table exists)
+  if table_exists "${DB_PREFIX}woocommerce_order_items"; then
+    log "Deleting old WooCommerce order items..."
+    wp_db_query_nonfatal "
+      DELETE oi
+      FROM ${DB_PREFIX}woocommerce_order_items oi
+      JOIN ${HELPER_TABLE} h ON h.order_id = oi.order_id;
+    "
+  else
+    log "Table ${DB_PREFIX}woocommerce_order_items not found; skipping order items deletion."
+  fi
 
   log "Deleting old orders from posts + postmeta..."
   wp_db_query_nonfatal "
@@ -354,17 +409,28 @@ main() {
   wp_db_query_nonfatal "DROP TABLE IF EXISTS ${HELPER_TABLE};"
 
   echo
-  log "Optimizing largest WooCommerce-related tables..."
-  wp_db_query_nonfatal "
-    OPTIMIZE TABLE
-      ${DB_PREFIX}postmeta,
-      ${DB_PREFIX}posts,
-      ${DB_PREFIX}comments,
-      ${DB_PREFIX}woocommerce_order_items,
-      ${DB_PREFIX}woocommerce_order_itemmeta,
-      ${DB_PREFIX}wc_order_stats,
-      ${DB_PREFIX}wc_order_product_lookup;
-  "
+  log "Optimizing largest WooCommerce-related tables (if present)..."
+  # Build list of existing tables for OPTIMIZE
+  OPTIMIZE_LIST=()
+  for tbl in \
+    "${DB_PREFIX}postmeta" \
+    "${DB_PREFIX}posts" \
+    "${DB_PREFIX}comments" \
+    "${DB_PREFIX}woocommerce_order_items" \
+    "${DB_PREFIX}woocommerce_order_itemmeta" \
+    "${DB_PREFIX}wc_order_stats" \
+    "${DB_PREFIX}wc_order_product_lookup"
+  do
+    if table_exists "$tbl"; then
+      OPTIMIZE_LIST+=("$tbl")
+    fi
+  done
+
+  if ((${#OPTIMIZE_LIST[@]} > 0)); then
+    wp_db_query_nonfatal "OPTIMIZE TABLE ${OPTIMIZE_LIST[*]};"
+  else
+    log "No target tables found to OPTIMIZE (possibly non-WooCommerce site)."
+  fi
 
   echo
   log "Final DB size after cleanup:"
