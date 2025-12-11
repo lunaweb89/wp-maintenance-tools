@@ -67,6 +67,18 @@ if (( DRY_RUN == 1 )); then
   log "DRY-RUN mode enabled: no configs, DNS, or services will be changed."
 fi
 
+# ----------------------------- CLOUDFLARE SWITCH ----------------------------- #
+
+CF_API_BASE="https://api.cloudflare.com/client/v4"
+USE_CLOUDFLARE=0
+
+if [[ -n "${CF_API_TOKEN:-}" ]]; then
+  USE_CLOUDFLARE=1
+  log "Cloudflare integration enabled (CF_API_TOKEN detected)."
+else
+  log "Cloudflare integration disabled (no CF_API_TOKEN set)."
+fi
+
 # ----------------------------- GLOBAL SETUP ----------------------------- #
 
 detect_server_ip() {
@@ -107,10 +119,10 @@ ensure_certbot() {
 }
 
 ensure_jq() {
-  if have_cmd jq; then
+  if (( USE_CLOUDFLARE == 0 )); then
     return
   fi
-  if [[ -z "${CF_API_TOKEN:-}" ]]; then
+  if have_cmd jq; then
     return
   fi
   if (( DRY_RUN == 1 )); then
@@ -130,8 +142,6 @@ ensure_jq() {
 ensure_certbot
 ensure_jq
 
-CF_API_BASE="https://api.cloudflare.com/client/v4"
-
 # ----------------------------- CLOUDFLARE HELPERS ----------------------------- #
 
 root_from_mail_fqdn() {
@@ -141,8 +151,7 @@ root_from_mail_fqdn() {
 
 cf_get_zone_id() {
   local root="$1"
-  if [[ -z "${CF_API_TOKEN:-}" ]]; then
-    warn "CF_API_TOKEN not set; skipping Cloudflare zone lookup for ${root}."
+  if (( USE_CLOUDFLARE == 0 )); then
     return 1
   fi
   if ! have_cmd jq; then
@@ -175,8 +184,15 @@ cf_get_zone_id() {
 cf_ensure_a_record() {
   local fqdn="$1"
   local ip="$2"
-  if [[ -z "${CF_API_TOKEN:-}" || -z "$ip" ]]; then
-    warn "Skipping Cloudflare DNS for ${fqdn} (CF_API_TOKEN or IP missing)."
+
+  if (( USE_CLOUDFLARE == 0 )); then
+    # Completely skip silently except for debug log
+    log "Skipping Cloudflare DNS for ${fqdn} (Cloudflare disabled)."
+    return
+  fi
+
+  if [[ -z "$ip" ]]; then
+    warn "No server IP; skipping Cloudflare DNS for ${fqdn}."
     return
   fi
   if ! have_cmd jq; then
