@@ -13,7 +13,8 @@
 #   [7] Run Auto Backups Wizard to Dropbox (run now + install daily cron)
 #   [8] Check & Fix WordPress file permissions
 #   [9] Run WordPress health audit
-#   [10] Exit
+#   [10] Fix Mail SSL + DNS (multi-domain, Cloudflare optional)
+#   [11] Exit
 #
 # Run directly from GitHub (as root):
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/wp-maintenance-tools/main/wp-toolkit.sh)
@@ -59,27 +60,26 @@ run_malware_scan() {
 
 backup_wp_local_migration() {
   log "Running local migration-style backup for selected WordPress sites..."
-  # --backup-only = Old server backup mode (with site selection)
   bash <(curl -fsSL "${REPO_BASE}/wp-migrate-local.sh") --backup-only
 }
 
 backup_wp_to_dropbox_manual() {
-  log "Launching manual WP → Dropbox backup (DB + files, no local retention)..."
+  log "Launching manual WP → Dropbox backup..."
   bash <(curl -fsSL "${REPO_BASE}/wp-backup-dropbox.sh")
 }
 
 restore_from_dropbox() {
-  log "Launching restore from Dropbox (DB + files)..."
+  log "Launching restore from Dropbox..."
   bash <(curl -fsSL "${REPO_BASE}/wp-restore-dropbox.sh")
 }
 
 migration_wizard_local() {
-  log "Launching WordPress migration wizard (local backups, server to server)..."
+  log "Launching WordPress migration wizard..."
   bash <(curl -fsSL "${REPO_BASE}/wp-migrate-local.sh")
 }
 
 auto_backups_to_dropbox() {
-  log "Launching Auto Backups Wizard to Dropbox (run now + install daily cron)..."
+  log "Launching Auto Backups Wizard to Dropbox..."
   bash <(curl -fsSL "${REPO_BASE}/wp-backup-dropbox.sh") --auto-setup
 }
 
@@ -93,25 +93,63 @@ health_audit() {
   bash <(curl -fsSL "${REPO_BASE}/wp-health-audit.sh")
 }
 
+run_mail_ssl_multi() {
+  echo
+  echo "======================================="
+  echo "  Fix Mail SSL + DNS (multi-domain)"
+  echo "======================================="
+  echo "Notes:"
+  echo "  - First mail host will be used as PRIMARY SMTP TLS host."
+  echo "  - Cloudflare DNS auto-fix works ONLY if CF_API_TOKEN is exported."
+  echo "  - DRY-RUN available."
+  echo
+
+  read -rp "Enter mail host(s) (space-separated): " MAIL_HOSTS
+  if [[ -z "${MAIL_HOSTS}" ]]; then
+    warn "No mail hosts entered. Returning to main menu."
+    return
+  fi
+
+  read -rp "Run in DRY-RUN mode first? (y/N): " DRYANS
+
+  if [[ "$DRYANS" =~ ^[Yy]$ ]]; then
+    log "[DRY-RUN] Executing mail-auto-ssl-multi.sh..."
+    bash <(curl -fsSL "${REPO_BASE}/mail-auto-ssl-multi.sh") --dry-run ${MAIL_HOSTS}
+
+    echo
+    read -rp "Apply real changes now? (y/N): " APPLY
+    if [[ "$APPLY" =~ ^[Yy]$ ]]; then
+      log "[LIVE] Running mail-auto-ssl-multi.sh..."
+      bash <(curl -fsSL "${REPO_BASE}/mail-auto-ssl-multi.sh") ${MAIL_HOSTS}
+    else
+      warn "Skipped live apply."
+    fi
+  else
+    log "[LIVE] Running mail-auto-ssl-multi.sh..."
+    bash <(curl -fsSL "${REPO_BASE}/mail-auto-ssl-multi.sh") ${MAIL_HOSTS}
+  fi
+}
+
 main_menu() {
   while :; do
     echo
     echo "==============================="
     echo "  WordPress Maintenance Tools"
     echo "==============================="
-    echo "  [1] DB cleanup (WooCommerce order pruning)"
-    echo "  [2] Run Malware scan (Maldet + ClamAV)"
-    echo "  [3] Backup WordPress sites (local migration backups)"
-    echo "  [4] Backup ONLY WordPress sites to Dropbox (DB + files)"
-    echo "  [5] Restore WordPress from Dropbox (DB + files)"
-    echo "  [6] Run WordPress migration wizard (local backups, server to server)"
-    echo "  [7] Run Auto Backups Wizard to Dropbox (run now + install daily cron)"
-    echo "  [8] Check & Fix WordPress file permissions"
-    echo "  [9] Run WordPress health audit"
-    echo "  [10] Exit"
+    echo "  [1]  DB cleanup (WooCommerce order pruning)"
+    echo "  [2]  Run Malware scan (Maldet + ClamAV)"
+    echo "  [3]  Backup WordPress sites (local migration backups)"
+    echo "  [4]  Backup ONLY WordPress sites to Dropbox"
+    echo "  [5]  Restore WordPress from Dropbox"
+    echo "  [6]  Run WordPress migration wizard"
+    echo "  [7]  Auto Backups Wizard to Dropbox"
+    echo "  [8]  Check & Fix WordPress permissions"
+    echo "  [9]  Run WordPress health audit"
+    echo "  [10] Fix Mail SSL + DNS (Cloudflare optional)"
+    echo "  [11] Exit"
     echo
 
-    read -rp "Select an option [1-10]: " CHOICE
+    read -rp "Select an option [1-11]: " CHOICE
 
     case "$CHOICE" in
       1) run_cleanup_script ;;
@@ -123,8 +161,9 @@ main_menu() {
       7) auto_backups_to_dropbox ;;
       8) fix_wp_permissions ;;
       9) health_audit ;;
-      10) log "Goodbye."; exit 0 ;;
-      *) warn "Invalid choice. Please enter a number between 1 and 10." ;;
+      10) run_mail_ssl_multi ;;
+      11) log "Goodbye."; exit 0 ;;
+      *) warn "Invalid choice. Enter a number between 1 and 11." ;;
     esac
   done
 }
